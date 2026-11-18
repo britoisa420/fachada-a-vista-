@@ -8,11 +8,12 @@ const MB = 1024 * 1024;
 
 /** Regras de validação por tipo de anexo. */
 export const RULES = {
-  fachada: { label: 'Foto da fachada', maxBytes: 15 * MB, types: ['jpg', 'png', 'webp'], minSide: 480 },
-  logo: { label: 'Logo', maxBytes: 10 * MB, types: ['jpg', 'png', 'webp', 'svg', 'pdf'] },
+  foto: { label: 'Foto do local', maxBytes: 15 * MB, types: ['jpg', 'png', 'webp'], minSide: 480 },
   referencia: { label: 'Imagem de referência', maxBytes: 10 * MB, types: ['jpg', 'png', 'webp'] },
-  proposta: { label: 'Imagem da proposta', maxBytes: 20 * MB, types: ['jpg', 'png', 'webp'] },
-  marca: { label: 'Logo da marca', maxBytes: 5 * MB, types: ['png', 'webp', 'jpg', 'svg'] },
+  logo: { label: 'Logo', maxBytes: 10 * MB, types: ['jpg', 'png', 'webp', 'svg', 'pdf'] },
+  simulacao: { label: 'Simulação', maxBytes: 10 * MB, types: ['jpg', 'png', 'webp'] },
+  perfil: { label: 'Logo da empresa', maxBytes: 5 * MB, types: ['jpg', 'png', 'webp'] },
+  portfolio: { label: 'Foto de trabalho', maxBytes: 10 * MB, types: ['jpg', 'png', 'webp'] },
 };
 
 const MIME = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', svg: 'image/svg+xml', pdf: 'application/pdf' };

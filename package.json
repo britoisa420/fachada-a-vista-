@@ -2,7 +2,7 @@
   "name": "fachada-em-vista",
   "version": "1.0.0",
   "private": true,
-  "description": "Fachada em Vista — simulador de fachadas para lojistas",
+  "description": "Fachada em Vista — marketplace de fachada e comunicação visual para empresas, MEIs e prestadores",
   "type": "module",
   "main": "src/server.js",
   "scripts": {

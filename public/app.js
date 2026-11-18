@@ -43,7 +43,7 @@
     const pickText = $('[data-pick-text]', slot);
     const max = Number(slot.dataset.multiple || 1);
     const maxMb = Number(slot.dataset.maxMb || 10);
-    const isFachada = slot.dataset.name === 'fachada';
+    const isFachada = slot.dataset.name === 'fotos';
     let files = [];
 
     const showErr = (m) => { err.textContent = m || ''; err.hidden = !m; slot.classList.toggle('has-error', !!m); };
@@ -156,7 +156,7 @@
     $$('input[required], textarea[required], select[required]', form).forEach((el) => {
       if (el.type === 'file') {
         const slot = el.closest('[data-file-slot]');
-        if (slot && !slot._files().length) errs[el.name] = 'Envie a foto frontal da fachada.';
+        if (slot && !slot._files().length) errs[el.name] = 'Envie o arquivo.';
       } else if (el.type === 'checkbox') {
         if (!el.checked) errs[el.name] = 'Confirme para continuar.';
       } else if (!el.value.trim()) errs[el.name] = 'Campo obrigatório.';
@@ -212,7 +212,7 @@
       xhr.onload = () => {
         let j = null;
         try { j = JSON.parse(xhr.responseText); } catch (_) {}
-        if (xhr.status >= 200 && xhr.status < 300 && j && j.redirect) { window.location.assign(j.redirect); return; }
+        if (xhr.status >= 200 && xhr.status < 300 && j && j.redirect) { form.dispatchEvent(new Event('fv:sent')); window.location.assign(j.redirect); return; }
         fail((j && j.error) || 'Não foi possível enviar. Verifique sua conexão e tente novamente.', j && j.fields);
       };
       xhr.onerror = () => fail('Falha de conexão. Seus dados continuam aqui: tente enviar de novo.');
@@ -235,6 +235,32 @@
 
   document.addEventListener('DOMContentLoaded', () => {
     $$('[data-compare]').forEach(initCompare);
+    $$('[data-print]').forEach((b) => b.addEventListener('click', () => window.print()));
+    // Simulação feita no /criar: volta anexada ao novo pedido
+    const simSlot = $('[data-simulacao-slot]');
+    if (simSlot) {
+      const store = { get: (k) => { try { return sessionStorage.getItem(k); } catch (_) { return null; } }, clear: () => { try { sessionStorage.setItem('fv-sim', ''); } catch (_) {} } };
+      const url = store.get('fv-sim');
+      const hint = $('[data-sim-hint]');
+      if (url && /^data:image\/(jpeg|png);base64,/.test(url)) {
+        const [head, b64] = url.split(','); const bin = atob(b64); const u8 = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+        const type = head.slice(5).split(';')[0];
+        const file = new File([u8], 'simulacao.' + (type === 'image/png' ? 'png' : 'jpg'), { type });
+        const dt = new DataTransfer(); dt.items.add(file);
+        $('[data-sim-input]', simSlot).files = dt.files;
+        $('[data-sim-img]', simSlot).src = url;
+        simSlot.hidden = false;
+        if (hint) hint.hidden = true;
+        const nome = store.get('fv-sim-nome') || '';
+        const t = $('input[name=titulo]'); if (t && !t.value && nome) t.value = 'Placa para ' + nome;
+        $('[data-sim-remove]', simSlot).addEventListener('click', () => {
+          $('[data-sim-input]', simSlot).value = ''; simSlot.hidden = true; if (hint) hint.hidden = false; store.clear();
+        });
+      }
+      const f = simSlot.closest('form');
+      if (f) f.addEventListener('fv:sent', store.clear);
+    }
     $$('[data-file-slot]').forEach(initSlot);
     $$('[data-upload-form]').forEach(initUploadForm);
 

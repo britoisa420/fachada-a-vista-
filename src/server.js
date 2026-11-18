@@ -2,781 +2,500 @@ import express from 'express';
 import multer from 'multer';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { db, get, all, run, tx, logEvent, getSettings, setSetting, TMP_DIR } from './db.js';
-import { inspect, store, removeFile, cleanupTmp, sendStored } from './files.js';
-import { getOrCreateCheckout, confirmPayment, verifyMpSignature, handleMpNotification, pollProvider } from './payments.js';
+import { get, all, run, tx, logEvent, TMP_DIR } from './db.js';
+import { inspect, store, cleanupTmp, sendStored } from './files.js';
 import * as auth from './auth.js';
-import { shortCode, token, randomId, nowIso, UserError, isIdem, clip, onlyDigits, sanitizeColor, waLink } from './util.js';
-import * as pub from './views/public.js';
-import * as adm from './views/admin.js';
-import { CHANGE_TYPES, PRESERVE } from './views/common.js';
+import { shortCode, token, nowIso, UserError, isIdem, clip, onlyDigits, sha256 } from './util.js';
+import { CATEGORIAS, SITUACAO, ORCAMENTO, PRAZO, DOC_TIPO, UFS, validCPF, validCNPJ, contractText } from './domain.js';
+import * as V from './views/pages.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const app = express();
+export const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
 auth.seedAdmin();
 setInterval(auth.cleanupSessions, 3600_000).unref();
 
-// ---------- Cabeçalhos de segurança ----------
+// ---------- Segurança ----------
 app.use((req, res, next) => {
   res.set({
     'X-Content-Type-Options': 'nosniff',
-    'Referrer-Policy': 'same-origin', // tokens dos links privados nunca vazam para outros sites
+    'Referrer-Policy': 'same-origin',
     'X-Frame-Options': 'DENY',
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'",
   });
-  if (!res.get('Content-Security-Policy')) {
-    res.set('Content-Security-Policy', "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; form-action 'self' https:; frame-ancestors 'none'; base-uri 'self'; object-src 'none'");
-  }
   next();
 });
 app.use('/static', express.static(path.join(__dirname, '..', 'public'), { maxAge: '1h' }));
 app.use(express.urlencoded({ extended: false, limit: '200kb' }));
-app.use(express.json({ limit: '200kb' }));
+app.use(auth.loadUser);
 
-const baseUrl = (req) => (getSettings().public_url || process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-const sendHtml = (res, s, status = 200) => res.status(status).type('html').send(String(s));
+const send = (res, s, status = 200) => res.status(status).type('html').send(String(s));
 const wantsJson = (req) => (req.get('accept') || '').includes('application/json');
+const arr = (v) => (Array.isArray(v) ? v : v == null || v === '' ? [] : [v]);
+const nomeDe = (u) => u.empresa || u.nome;
+const okEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s);
+const ua = (req) => clip(req.get('user-agent'), 300);
+const notFound = (req, res, txt = 'Não encontramos o que você procurava.') => send(res, V.erro({ user: req.user, titulo: 'Não encontrado', texto: txt }), 404);
 
-// ---------- Uploads (sempre em pasta temporária; só vão para o armazenamento privado após validação) ----------
-const upload = multer({ dest: TMP_DIR, limits: { fileSize: 20 * 1024 * 1024, files: 6, fields: 40, fieldSize: 20000 } });
+// ---------- Uploads (vão para pasta temporária e só são guardados após validação) ----------
+const upload = multer({ dest: TMP_DIR, limits: { fileSize: 15 * 1024 * 1024, files: 10, fields: 40, fieldSize: 20000 } });
 function uploadFields(fields) {
   const mw = upload.fields(fields);
-  return (req, res, next) =>
-    mw(req, res, (err) => {
-      if (!err) return next();
-      cleanupTmp(req);
-      const msg = err.code === 'LIMIT_FILE_SIZE' ? 'Um dos arquivos passou do tamanho máximo permitido.'
-        : err.code === 'LIMIT_UNEXPECTED_FILE' ? 'Arquivos demais: envie 1 foto da fachada, 1 logo e até 3 referências.'
-        : 'Não foi possível receber os arquivos. Tente novamente.';
-      if (wantsJson(req) || req.path.startsWith('/api/')) return res.status(400).json({ error: msg });
-      return res.status(400).send(msg);
-    });
+  return (req, res, next) => mw(req, res, (err) => {
+    if (!err) return next();
+    cleanupTmp(req);
+    const msg = err.code === 'LIMIT_FILE_SIZE' ? 'Um dos arquivos passou de 15 MB.' : err.code === 'LIMIT_UNEXPECTED_FILE' ? 'Arquivos demais: até 4 fotos, 1 logo e 3 referências.' : 'Não foi possível receber os arquivos. Tente novamente.';
+    return res.status(400).json({ error: msg });
+  });
 }
 const filesOf = (req, name) => (req.files && req.files[name]) || [];
 
-// Limite simples de criação por IP (evita abuso)
+// Limite de criação por IP
 const hits = new Map();
-function rateLimit(max, windowMs) {
-  return (req, res, next) => {
-    const k = `${req.path}|${req.ip}`;
-    const now = Date.now();
-    const list = (hits.get(k) || []).filter((t) => now - t < windowMs);
-    if (list.length >= max) {
-      cleanupTmp(req);
-      return res.status(429).json({ error: 'Muitas tentativas em pouco tempo. Aguarde alguns minutos.' });
-    }
-    list.push(now);
-    hits.set(k, list);
-    next();
+const rateLimit = (max, windowMs) => (req, res, next) => {
+  const k = `${req.route ? req.route.path : req.path}|${req.ip}`; const now = Date.now();
+  const list = (hits.get(k) || []).filter((t) => now - t < windowMs);
+  if (list.length >= max) { cleanupTmp(req); return wantsJson(req) ? res.status(429).json({ error: 'Muitas tentativas. Aguarde alguns minutos.' }) : send(res, V.erro({ user: req.user, titulo: 'Calma aí', texto: 'Muitas tentativas em pouco tempo. Aguarde alguns minutos.' }), 429); }
+  list.push(now); hits.set(k, list); next();
+};
+
+// ---------- Avaliação média do prestador ----------
+const ratingOf = (id) => { const r = get('SELECT AVG(nota) AS avg, COUNT(*) AS n FROM reviews WHERE prestador_id = ?', id); return { avg: r.avg || 0, n: r.n }; };
+
+// ====================================================================
+// Público e contas
+// ====================================================================
+app.get('/', (req, res) => {
+  const stats = { pedidos: get('SELECT COUNT(*) AS n FROM requests').n, prestadores: get("SELECT COUNT(*) AS n FROM users WHERE role = 'prestador' AND blocked = 0").n };
+  send(res, V.home({ user: req.user, stats: stats.pedidos + stats.prestadores > 0 ? stats : null }));
+});
+app.get('/para-prestadores', (req, res) => send(res, V.paraPrestadores({ user: req.user })));
+app.get('/criar', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'criar.html')));
+app.get('/termos', (req, res) => send(res, V.textoPagina({ user: req.user, titulo: 'Termos de uso', paragrafos: [
+  'A Fachada em Vista é uma plataforma que aproxima empresas, MEIs e lojistas (contratantes) de prestadores de serviços de comunicação visual. Ao criar uma conta, você declara que as informações fornecidas são verdadeiras e que tem poderes para representar o negócio cadastrado.',
+  'A plataforma não presta os serviços, não é parte dos contratos firmados entre os usuários, não recebe nem intermedeia pagamentos e não garante a execução, a qualidade ou os prazos dos serviços. Cabe a cada parte verificar as informações da outra antes de contratar.',
+  'O contrato gerado pela plataforma é um modelo preenchido com os dados do pedido e da proposta. As partes podem ajustá-lo de comum acordo fora da plataforma. Recomendamos consultar um advogado para contratos de valor elevado.',
+  'É proibido publicar conteúdo falso, ofensivo ou ilegal, usar dados de terceiros sem autorização ou usar a plataforma para fins diferentes da contratação de serviços. Contas que violarem estas regras podem ser bloqueadas.',
+  'O uso da plataforma é gratuito nesta fase. Qualquer cobrança futura será comunicada com antecedência e só valerá após aceite.',
+] })));
+app.get('/privacidade', (req, res) => send(res, V.textoPagina({ user: req.user, titulo: 'Política de privacidade', paragrafos: [
+  'Coletamos os dados que você informa no cadastro (nome, e-mail, WhatsApp, CNPJ ou CPF, cidade) e nos pedidos (descrição, fotos, logo), além de registros técnicos de acesso (IP e data), usados para segurança e para o registro das assinaturas dos contratos.',
+  'Pedidos ficam visíveis para prestadores cadastrados com a cidade, o bairro, a descrição e as fotos. Nome, e-mail, WhatsApp e documento do contratante só são compartilhados com o prestador cujo contrato foi assinado pelas duas partes.',
+  'O perfil público do prestador mostra o nome da empresa, a cidade, os serviços, a apresentação e as avaliações. O documento e o contato do prestador só aparecem no contrato.',
+  'Os dados são usados apenas para o funcionamento da plataforma, nos termos da Lei Geral de Proteção de Dados (Lei 13.709/2018). Você pode pedir a correção ou a exclusão dos seus dados pelos canais de contato da plataforma; contratos assinados são mantidos pelo prazo legal.',
+] })));
+
+app.get('/entrar', (req, res) => {
+  if (req.user) return res.redirect(req.user.role === 'admin' ? '/admin' : '/painel');
+  send(res, V.entrar({ user: null, volta: clip(req.query.volta, 300) }));
+});
+app.post('/entrar', (req, res) => {
+  const email = clip(req.body.email, 160).toLowerCase();
+  const volta = /^\/[^/\\]/.test(req.body.volta || '') ? req.body.volta : '';
+  if (!auth.loginAllowed(req.ip)) return send(res, V.entrar({ user: null, email, volta, error: 'Muitas tentativas. Aguarde 15 minutos.' }), 429);
+  const u = get('SELECT * FROM users WHERE email = ?', email);
+  if (!u || !auth.verifyPassword(req.body.senha || '', u.pass_hash)) { auth.loginFailed(req.ip); return send(res, V.entrar({ user: null, email, volta, error: 'E-mail ou senha incorretos.' }), 401); }
+  if (u.blocked) return send(res, V.entrar({ user: null, email, volta, error: 'Esta conta está bloqueada. Fale com a administração.' }), 403);
+  auth.startSession(res, req, u.id);
+  res.redirect(303, volta || (u.role === 'admin' ? '/admin' : '/painel'));
+});
+app.post('/sair', (req, res) => { auth.endSession(req, res); res.redirect(303, '/'); });
+
+/** Valida os dados de perfil (cadastro e edição). */
+function parsePerfil(body, tipo) {
+  const e = {};
+  const v = {
+    empresa: clip(body.empresa, 120), nome: clip(body.nome, 120), doc_tipo: DOC_TIPO[body.doc_tipo] ? body.doc_tipo : '',
+    documento: onlyDigits(body.documento), whatsapp: onlyDigits(body.whatsapp), cidade: clip(body.cidade, 80), uf: UFS.includes(body.uf) ? body.uf : '',
+    categorias: arr(body.categorias).filter((c) => CATEGORIAS[c]), atende_estado: body.atende_estado ? 1 : 0, bio: clip(body.bio, 1500), site: clip(body.site, 200),
   };
+  if (v.empresa.length < 2) e.empresa = 'Informe o nome.';
+  if (v.nome.length < 2) e.nome = 'Informe o nome do responsável.';
+  if (!v.doc_tipo) e.doc_tipo = 'Escolha o tipo de cadastro.';
+  else if (v.doc_tipo === 'cpf' ? !validCPF(v.documento) : !validCNPJ(v.documento)) e.documento = v.doc_tipo === 'cpf' ? 'CPF inválido. Confira os números.' : 'CNPJ inválido. Confira os números.';
+  if (v.whatsapp.length < 10 || v.whatsapp.length > 13) e.whatsapp = 'Informe o WhatsApp com DDD.';
+  if (v.cidade.length < 2) e.cidade = 'Informe a cidade.';
+  if (!v.uf) e.uf = 'Escolha a UF.';
+  if (tipo === 'prestador' && !v.categorias.length) e.categorias = 'Selecione pelo menos um serviço.';
+  if (v.site && !/^(https?:\/\/)?[\w.-]+\.[a-z]{2,}(\/\S*)?$/i.test(v.site)) e.site = 'Endereço inválido.';
+  return { v, e };
 }
 
-// ---------- Validação do briefing ----------
-function parseBriefing(body, { contact }) {
-  const errors = {};
-  const d = {
-    name: clip(body.nome, 120),
-    store_name: clip(body.loja, 120),
-    email: clip(body.email, 160).toLowerCase(),
-    whatsapp: onlyDigits(body.whatsapp).slice(0, 15),
-    change_types: [].concat(body.tipos || []).filter((t) => t in CHANGE_TYPES),
-    change_other: clip(body.outra, 200),
-    colors: clip(body.cores, 300),
-    description: clip(body.descricao, 3000),
-    preserve: [].concat(body.preservar || []).filter((t) => t in PRESERVE),
-    preserve_other: clip(body.preservar_outros, 300),
-  };
-  if (contact) {
-    if (d.name.length < 2) errors.nome = 'Informe seu nome.';
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(d.email)) errors.email = 'Informe um e-mail válido.';
-    if (d.whatsapp.length < 10 || d.whatsapp.length > 13) errors.whatsapp = 'Informe o WhatsApp com DDD.';
+app.get('/cadastro', (req, res) => {
+  if (req.user) return res.redirect('/painel');
+  send(res, V.cadastro({ user: null, tipo: req.query.tipo === 'prestador' ? 'prestador' : 'empresa' }));
+});
+app.post('/cadastro', rateLimit(8, 3600_000), (req, res) => {
+  const tipo = req.body.tipo === 'prestador' ? 'prestador' : 'empresa';
+  const { v, e } = parsePerfil(req.body, tipo);
+  v.email = clip(req.body.email, 160).toLowerCase();
+  if (!okEmail(v.email)) e.email = 'Informe um e-mail válido.';
+  else if (get('SELECT 1 FROM users WHERE email = ?', v.email)) e.email = 'Já existe uma conta com este e-mail. Entre ou use outro.';
+  if (String(req.body.senha || '').length < 8) e.senha = 'A senha precisa ter pelo menos 8 caracteres.';
+  if (!req.body.termos) e.termos = 'É preciso aceitar os termos.';
+  if (Object.keys(e).length) return send(res, V.cadastro({ user: null, tipo, v, e, error: 'Revise os campos destacados.' }), 400);
+  const t = nowIso();
+  const r = run(`INSERT INTO users (role, email, pass_hash, nome, empresa, doc_tipo, documento, whatsapp, cidade, uf, categorias, atende_estado, bio, site, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, tipo, v.email, auth.hashPassword(req.body.senha), v.nome, v.empresa, v.doc_tipo, v.documento, v.whatsapp, v.cidade, v.uf,
+  JSON.stringify(tipo === 'prestador' ? v.categorias : []), v.atende_estado, v.bio, v.site, t, t);
+  auth.startSession(res, req, Number(r.lastInsertRowid));
+  res.redirect(303, (tipo === 'prestador' ? '/oportunidades' : '/painel') + '?msg=bemvindo');
+});
+
+app.get('/conta', auth.requireRole('empresa', 'prestador'), (req, res) => {
+  const u = req.user;
+  send(res, V.conta({ user: u, req, v: { ...u, categorias: JSON.parse(u.categorias || '[]') }, avaliacoes: ratingOf(u.id) }));
+});
+app.post('/conta', auth.requireRole('empresa', 'prestador'), (req, res) => {
+  const u = req.user;
+  const { v, e } = parsePerfil(req.body, u.role);
+  if (Object.keys(e).length) return send(res, V.conta({ user: u, req, v, e, error: 'Revise os campos destacados.', avaliacoes: ratingOf(u.id) }), 400);
+  run(`UPDATE users SET nome=?, empresa=?, doc_tipo=?, documento=?, whatsapp=?, cidade=?, uf=?, categorias=?, atende_estado=?, bio=?, site=?, updated_at=? WHERE id = ?`,
+    v.nome, v.empresa, v.doc_tipo, v.documento, v.whatsapp, v.cidade, v.uf, JSON.stringify(u.role === 'prestador' ? v.categorias : []), v.atende_estado, v.bio, v.site, nowIso(), u.id);
+  res.redirect(303, '/conta?msg=conta');
+});
+app.post('/conta/senha', auth.requireRole('empresa', 'prestador', 'admin'), (req, res) => {
+  const row = get('SELECT pass_hash FROM users WHERE id = ?', req.user.id);
+  const back = req.user.role === 'admin' ? '/admin' : '/conta';
+  if (!auth.verifyPassword(req.body.atual || '', row.pass_hash)) return send(res, V.erro({ user: req.user, titulo: 'Senha atual incorreta', texto: 'Volte e tente de novo.' }), 400);
+  if (String(req.body.nova || '').length < 8) return send(res, V.erro({ user: req.user, titulo: 'Senha curta', texto: 'A nova senha precisa ter pelo menos 8 caracteres.' }), 400);
+  run('UPDATE users SET pass_hash = ?, updated_at = ? WHERE id = ?', auth.hashPassword(req.body.nova), nowIso(), req.user.id);
+  res.redirect(303, back + '?msg=senha');
+});
+
+app.get('/painel', auth.requireRole(), (req, res) => {
+  const u = req.user;
+  if (u.role === 'admin') return res.redirect('/admin');
+  if (u.role === 'empresa') {
+    const pedidos = all(`SELECT r.*, (SELECT COUNT(*) FROM proposals p WHERE p.request_id = r.id AND p.status <> 'retirada') AS n_prop,
+      (SELECT id FROM files f WHERE f.owner_type='pedido' AND f.owner_id = r.id AND f.role IN ('foto','simulacao') ORDER BY f.role = 'simulacao' DESC, f.created_at LIMIT 1) AS thumb_id,
+      (SELECT COUNT(*) FROM messages m JOIN proposals p ON p.id = m.proposal_id LEFT JOIN reads rd ON rd.user_id = ? AND rd.proposal_id = p.id WHERE p.request_id = r.id AND m.author_id <> ? AND m.id > COALESCE(rd.last_id,0)) AS unread
+      FROM requests r WHERE r.empresa_id = ? ORDER BY r.created_at DESC`, u.id, u.id, u.id).map((r) => ({ ...r, thumb: r.thumb_id ? { id: r.thumb_id } : null }));
+    return send(res, V.painelEmpresa({ user: u, req, pedidos }));
   }
-  if (d.store_name.length < 2) errors.loja = 'Informe o nome da loja.';
-  if (!d.change_types.length) errors.tipos = 'Selecione pelo menos uma opção.';
-  if (d.change_types.includes('outra') && !d.change_other) errors.outra = 'Conte qual alteração deseja testar.';
-  if (d.description.length < 5) errors.descricao = 'Descreva o que você imagina para a fachada.';
-  return { d, errors };
-}
+  const props = all(`SELECT p.*, r.titulo, r.cidade, r.uf, r.status AS r_status,
+    (SELECT COUNT(*) FROM messages m LEFT JOIN reads rd ON rd.user_id = ? AND rd.proposal_id = p.id WHERE m.proposal_id = p.id AND m.author_id <> ? AND m.id > COALESCE(rd.last_id,0)) AS unread
+    FROM proposals p JOIN requests r ON r.id = p.request_id WHERE p.prestador_id = ? ORDER BY p.updated_at DESC`, u.id, u.id, u.id);
+  const contratos = all(`SELECT c.*, r.titulo, COALESCE(e.empresa, e.nome) AS e_nome FROM contracts c JOIN requests r ON r.id = c.request_id JOIN users e ON e.id = c.empresa_id
+    WHERE c.prestador_id = ? AND c.status <> 'cancelado' ORDER BY c.created_at DESC`, u.id);
+  send(res, V.painelPrestador({ user: u, req, props, contratos }));
+});
 
-function inspectBriefingFiles(req) {
-  const fachada = filesOf(req, 'fachada')[0];
-  if (!fachada) throw new UserError('Envie a foto frontal da fachada.', 400, { fachada: 'Envie a foto frontal da fachada.' });
-  const out = [{ file: fachada, role: 'fachada', info: inspect(fachada, 'fachada') }];
-  const logo = filesOf(req, 'logo')[0];
-  if (logo) out.push({ file: logo, role: 'logo', info: inspect(logo, 'logo') });
-  const refs = filesOf(req, 'referencias');
-  if (refs.length > 3) throw new UserError('Envie no máximo 3 imagens de referência.');
-  for (const f of refs) out.push({ file: f, role: 'referencia', info: inspect(f, 'referencia') });
+// ====================================================================
+// Pedidos (empresa)
+// ====================================================================
+app.get('/pedidos/novo', auth.requireRole('empresa'), (req, res) => send(res, V.novoPedido({ user: req.user, idem: token() })));
+
+app.post('/pedidos', auth.requireRole('empresa'), rateLimit(20, 3600_000),
+  uploadFields([{ name: 'fotos', maxCount: 4 }, { name: 'logo', maxCount: 1 }, { name: 'referencias', maxCount: 3 }, { name: 'simulacao', maxCount: 1 }]),
+  (req, res) => {
+    try {
+      const b = req.body; const e = {};
+      if (!isIdem(b.idem)) throw new UserError('Recarregue a página e tente de novo.');
+      const dup = get('SELECT id FROM requests WHERE idem_key = ?', b.idem);
+      if (dup) { cleanupTmp(req); return res.json({ redirect: `/pedidos/${dup.id}?msg=pedido` }); }
+      const d = {
+        titulo: clip(b.titulo, 100), categorias: arr(b.categorias).filter((c) => CATEGORIAS[c]), descricao: clip(b.descricao, 4000), medidas: clip(b.medidas, 200),
+        situacao: SITUACAO[b.situacao] ? b.situacao : 'tenho', cidade: clip(b.cidade, 80), uf: UFS.includes(b.uf) ? b.uf : '', bairro: clip(b.bairro, 80),
+        orcamento: ORCAMENTO[b.orcamento] ? b.orcamento : '', prazo: PRAZO[b.prazo] ? b.prazo : '',
+      };
+      if (d.titulo.length < 5) e.titulo = 'Escreva um título com pelo menos 5 caracteres.';
+      if (!d.categorias.length) e.categorias = 'Selecione pelo menos um tipo de serviço.';
+      if (d.descricao.length < 15) e.descricao = 'Descreva com pelo menos 15 caracteres.';
+      if (d.cidade.length < 2) e.cidade = 'Informe a cidade.';
+      if (!d.uf) e.uf = 'Escolha a UF.';
+      if (!d.orcamento) e.orcamento = 'Escolha uma faixa.';
+      if (!d.prazo) e.prazo = 'Escolha um prazo.';
+      if (!b.aceite) e.aceite = 'Confirme para publicar.';
+      if (Object.keys(e).length) throw new UserError('Revise os campos destacados.', 400, e);
+      const checks = [['fotos', 'foto'], ['logo', 'logo'], ['referencias', 'referencia'], ['simulacao', 'simulacao']]
+        .flatMap(([n, role]) => filesOf(req, n).map((f) => { try { return [f, role, inspect(f, role)]; } catch (err) { err.fields = { [n]: err.message }; throw err; } }));
+      const id = shortCode('PD', 6); const t = nowIso();
+      tx(() => {
+        run(`INSERT INTO requests (id, idem_key, empresa_id, titulo, categorias, descricao, situacao, cidade, uf, bairro, medidas, orcamento, prazo, created_at, updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, b.idem, req.user.id, d.titulo, JSON.stringify(d.categorias), d.descricao, d.situacao, d.cidade, d.uf, d.bairro, d.medidas, d.orcamento, d.prazo, t, t);
+        for (const [f, role, info] of checks) store(f, info, { ownerType: 'pedido', ownerId: id, role });
+        logEvent(id, nomeDe(req.user), 'Pedido publicado.');
+      });
+      res.json({ redirect: `/pedidos/${id}?msg=pedido` });
+    } catch (err) {
+      cleanupTmp(req);
+      if (err instanceof UserError) return res.status(err.status).json({ error: err.message, fields: err.fields });
+      console.error(err); res.status(500).json({ error: 'Não foi possível publicar agora. Tente novamente.' });
+    }
+  });
+
+const reqFiles = (id) => all("SELECT id, role, mime, width, height FROM files WHERE owner_type = 'pedido' AND owner_id = ? ORDER BY role = 'simulacao' DESC, created_at", id);
+function unreadByProposal(userId, reqId) {
+  const out = {};
+  for (const r of all(`SELECT p.id, COUNT(m.id) AS n FROM proposals p JOIN messages m ON m.proposal_id = p.id LEFT JOIN reads rd ON rd.user_id = ? AND rd.proposal_id = p.id
+    WHERE p.request_id = ? AND m.author_id <> ? AND m.id > COALESCE(rd.last_id,0) GROUP BY p.id`, userId, reqId, userId)) out[r.id] = r.n;
   return out;
 }
+const propsWithPrestador = (reqId) => all(`SELECT p.*, COALESCE(u.empresa,u.nome) AS p_nome, u.cidade AS p_cidade, u.uf AS p_uf,
+  (SELECT AVG(nota) FROM reviews WHERE prestador_id = u.id) AS avg, (SELECT COUNT(*) FROM reviews WHERE prestador_id = u.id) AS n_rev
+  FROM proposals p JOIN users u ON u.id = p.prestador_id WHERE p.request_id = ? ORDER BY p.created_at`, reqId);
 
-function insertOrder({ d, kind, packageId = null, idem, status, price }) {
-  let id;
-  do id = shortCode('FV'); while (get('SELECT 1 FROM orders WHERE id = ?', id));
-  const now = nowIso();
-  run(
-    `INSERT INTO orders (id, kind, package_id, idem_key, access_token, status, name, store_name, email, whatsapp,
-      change_types, change_other, colors, description, preserve, preserve_other, price_cents, created_at, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    id, kind, packageId, idem, token(), status, d.name || null, d.store_name, d.email || null, d.whatsapp || null,
-    JSON.stringify(d.change_types), d.change_other, d.colors, d.description, JSON.stringify(d.preserve), d.preserve_other, price, now, now,
-  );
-  return id;
+app.get('/pedidos/:id', auth.requireRole('empresa'), (req, res) => {
+  const r = get('SELECT * FROM requests WHERE id = ? AND empresa_id = ?', req.params.id, req.user.id);
+  if (!r) return notFound(req, res);
+  const contract = get(`SELECT c.*, COALESCE(u.empresa,u.nome) AS p_nome FROM contracts c JOIN users u ON u.id = c.prestador_id WHERE c.request_id = ? AND c.status <> 'cancelado'`, r.id);
+  send(res, V.pedidoEmpresa({ user: req.user, req, r, files: reqFiles(r.id), props: propsWithPrestador(r.id), contract, unread: unreadByProposal(req.user.id, r.id) }));
+});
+app.post('/pedidos/:id/cancelar', auth.requireRole('empresa'), (req, res) => {
+  const r = get('SELECT * FROM requests WHERE id = ? AND empresa_id = ?', req.params.id, req.user.id);
+  if (!r) return notFound(req, res);
+  if (r.status === 'aberto') { run("UPDATE requests SET status = 'cancelado', updated_at = ? WHERE id = ?", nowIso(), r.id); logEvent(r.id, nomeDe(req.user), 'Pedido cancelado.'); }
+  res.redirect(303, `/pedidos/${r.id}?msg=cancelado`);
+});
+
+// ====================================================================
+// Oportunidades e propostas (prestador)
+// ====================================================================
+app.get('/oportunidades', auth.requireRole('prestador'), (req, res) => {
+  const u = req.user;
+  const todos = !!req.query.todos;
+  const f = { uf: UFS.includes(req.query.uf) ? req.query.uf : (todos || 'uf' in req.query ? '' : u.uf), cidade: clip(req.query.cidade, 80), cat: CATEGORIAS[req.query.cat] ? req.query.cat : '' };
+  const where = ["r.status = 'aberto'"]; const params = [];
+  if (f.uf) { where.push('r.uf = ?'); params.push(f.uf); }
+  if (f.cidade) { where.push('r.cidade LIKE ?'); params.push(`%${f.cidade}%`); }
+  if (f.cat) { where.push('r.categorias LIKE ?'); params.push(`%"${f.cat}"%`); }
+  const list = all(`SELECT r.*, (SELECT COUNT(*) FROM proposals p WHERE p.request_id = r.id AND p.status <> 'retirada') AS n_prop,
+    (SELECT status FROM proposals p WHERE p.request_id = r.id AND p.prestador_id = ?) AS minha,
+    (SELECT id FROM files fl WHERE fl.owner_type='pedido' AND fl.owner_id = r.id AND fl.role IN ('foto','simulacao') ORDER BY fl.role = 'simulacao' DESC, fl.created_at LIMIT 1) AS thumb_id
+    FROM requests r WHERE ${where.join(' AND ')} ORDER BY r.created_at DESC LIMIT 200`, u.id, ...params).map((r) => ({ ...r, thumb: r.thumb_id ? { id: r.thumb_id } : null }));
+  send(res, V.oportunidades({ user: u, req, list, f }));
+});
+
+function loadOportunidade(req) {
+  const r = get('SELECT * FROM requests WHERE id = ?', req.params.id);
+  if (!r) return null;
+  const mine = get('SELECT * FROM proposals WHERE request_id = ? AND prestador_id = ?', r.id, req.user.id);
+  if (r.status !== 'aberto' && !mine) return null; // pedidos fechados só para quem participou
+  const owner = get('SELECT empresa, nome FROM users WHERE id = ?', r.empresa_id);
+  return { r, mine, owner };
 }
-
-function jsonError(res, req, e) {
-  cleanupTmp(req);
-  if (e instanceof UserError) return res.status(e.status).json({ error: e.message, fields: e.fields });
-  console.error(e);
-  return res.status(500).json({ error: 'Erro inesperado. Tente novamente em instantes.' });
-}
-
-// =====================================================================
-// PÁGINAS PÚBLICAS
-// =====================================================================
-app.get('/', (req, res) => sendHtml(res, pub.homePage()));
-app.get('/simular', (req, res) => sendHtml(res, pub.orderFormPage({ idem: randomId() + randomId() })));
-app.get('/pacote', (req, res) => sendHtml(res, pub.packageFormPage({ idem: randomId() + randomId() })));
-
-app.get('/marca/logo', (req, res) => {
-  const id = getSettings().brand_logo_file;
-  const f = id && get("SELECT * FROM files WHERE id = ? AND owner_type = 'settings'", id);
-  if (!f) return res.status(404).end();
-  sendStored(res, f);
+app.get('/oportunidades/:id', auth.requireRole('prestador'), (req, res) => {
+  const o = loadOportunidade(req); if (!o) return notFound(req, res, 'Este pedido não existe ou não está mais aberto.');
+  send(res, V.oportunidade({ user: req.user, req, ...o, files: reqFiles(o.r.id), idem: token() }));
 });
-
-// ---------- Criar pedido avulso ----------
-app.post('/api/pedidos', rateLimit(20, 3600_000), uploadFields([{ name: 'fachada', maxCount: 1 }, { name: 'logo', maxCount: 1 }, { name: 'referencias', maxCount: 3 }]), (req, res) => {
-  try {
-    const idem = req.body.idem;
-    if (!isIdem(idem)) throw new UserError('Formulário expirado. Recarregue a página.');
-    const existing = get('SELECT id, access_token FROM orders WHERE idem_key = ?', idem);
-    if (existing) {
-      cleanupTmp(req);
-      return res.json({ redirect: `/pedido/${existing.id}?t=${existing.access_token}`, duplicate: true });
-    }
-    const { d, errors } = parseBriefing(req.body, { contact: true });
-    if (req.body.aceite !== '1') errors.aceite = 'Confirme que leu a observação sobre a simulação.';
-    if (Object.keys(errors).length) throw new UserError('Revise os campos destacados.', 400, errors);
-    const files = inspectBriefingFiles(req);
-    const s = getSettings();
-    const id = tx(() => {
-      const id = insertOrder({ d, kind: 'avulso', idem, status: 'aguardando_pagamento', price: s.price_single });
-      for (const f of files) store(f.file, f.info, { ownerType: 'order', ownerId: id, role: f.role });
-      logEvent(id, 'cliente', 'Pedido avulso criado.');
-      return id;
-    });
-    const o = get('SELECT access_token FROM orders WHERE id = ?', id);
-    res.json({ redirect: `/pedido/${id}?t=${o.access_token}` });
-  } catch (e) {
-    if (String(e.message).includes('UNIQUE') && String(e.message).includes('idem_key')) {
-      const ex = get('SELECT id, access_token FROM orders WHERE idem_key = ?', req.body.idem);
-      cleanupTmp(req);
-      return res.json({ redirect: `/pedido/${ex.id}?t=${ex.access_token}`, duplicate: true });
-    }
-    jsonError(res, req, e);
-  }
-});
-
-function orderByToken(req) {
-  const o = get('SELECT * FROM orders WHERE id = ?', req.params.id);
-  const t = req.query.t || req.body?.t;
-  if (!o || !t || o.access_token !== t) return null;
-  return o;
-}
-
-app.get('/pedido/:id', (req, res) => {
-  const order = orderByToken(req);
-  if (!order) return sendHtml(res, pub.messagePage({ title: 'Pedido não encontrado', text: 'Confira se o link está completo.' }), 404);
-  const files = all("SELECT * FROM files WHERE owner_type = 'order' AND owner_id = ?", order.id);
-  sendHtml(res, pub.orderPage({ order, files, baseUrl: baseUrl(req), req }));
-});
-
-app.get('/pedido/:id/f/:fileId', (req, res) => {
-  const order = orderByToken(req);
-  const f = order && get("SELECT * FROM files WHERE id = ? AND owner_type = 'order' AND owner_id = ? AND role != 'proposta'", req.params.fileId, order.id);
-  if (!f) return res.status(404).end();
-  sendStored(res, f);
-});
-
-app.post('/pedido/:id/pagar', async (req, res) => {
-  const order = orderByToken(req);
-  if (!order) return sendHtml(res, pub.messagePage({ title: 'Pedido não encontrado', text: 'Confira se o link está completo.' }), 404);
-  if (order.status !== 'aguardando_pagamento') return res.redirect(303, `/pedido/${order.id}?t=${order.access_token}`);
-  try {
-    const url = await getOrCreateCheckout({ refType: 'order', refId: order.id, baseUrl: baseUrl(req), accessToken: order.access_token });
-    res.redirect(303, url);
-  } catch (e) {
-    sendHtml(res, pub.messagePage({ title: 'Pagamento indisponível', text: e.message }), e.status || 500);
-  }
-});
-
-// ---------- Retorno do checkout: nunca confirma o pagamento por conta própria ----------
-function refByToken(ref, t) {
-  if (!ref || !t) return null;
-  if (ref.startsWith('PK-')) {
-    const p = get('SELECT * FROM packages WHERE id = ? AND access_token = ?', ref, t);
-    return p && { kind: 'package', row: p };
-  }
-  const o = get('SELECT * FROM orders WHERE id = ? AND access_token = ?', ref, t);
-  return o && { kind: 'order', row: o };
-}
-app.get('/pagamento/retorno', (req, res) => {
-  const r = refByToken(String(req.query.ref || ''), String(req.query.t || ''));
-  if (!r) return sendHtml(res, pub.messagePage({ title: 'Pedido não encontrado', text: 'Confira se o link está completo.' }), 404);
-  sendHtml(res, pub.returnPage({ kind: r.kind, ref: r.row.id, t: r.row.access_token, status: r.row.status }));
-});
-app.get('/api/status', async (req, res) => {
-  let r = refByToken(String(req.query.ref || ''), String(req.query.t || ''));
-  if (!r) return res.status(404).json({ error: 'não encontrado' });
-  if (r.row.status === 'aguardando_pagamento') {
-    await pollProvider(r.kind, r.row.id);
-    r = refByToken(r.row.id, r.row.access_token);
-  }
-  res.set('Cache-Control', 'no-store').json({ status: r.row.status, paid: r.row.status !== 'aguardando_pagamento' });
-});
-
-// ---------- Checkout de demonstração (simula o provedor externo) ----------
-app.get('/checkout-demo/:id', (req, res) => {
-  const co = get("SELECT * FROM checkouts WHERE id = ? AND provider = 'demo'", req.params.id);
-  if (!co) return sendHtml(res, pub.messagePage({ title: 'Checkout não encontrado', text: 'Volte ao pedido e tente novamente.' }), 404);
-  const ref = get(`SELECT * FROM ${co.ref_type === 'order' ? 'orders' : 'packages'} WHERE id = ?`, co.ref_id);
-  sendHtml(res, pub.demoCheckoutPage({ co, ref }));
-});
-app.post('/checkout-demo/:id/aprovar', (req, res) => {
-  if (getSettings().payment_provider !== 'demo') return res.status(403).send('Checkout de demonstração desativado.');
-  const co = get("SELECT * FROM checkouts WHERE id = ? AND provider = 'demo'", req.params.id);
-  if (!co) return res.status(404).send('Checkout não encontrado');
-  // Mesmo caminho de um webhook real: idempotente por id do pagamento
-  confirmPayment({ refType: co.ref_type, refId: co.ref_id, provider: 'demo', providerPaymentId: `demo-${co.id}`, amountCents: co.amount_cents, method: 'Demonstração' });
-  res.redirect(303, co.url);
-});
-
-// ---------- Webhook Mercado Pago ----------
-app.post('/webhooks/mercadopago', async (req, res) => {
-  if (!verifyMpSignature(req)) return res.status(401).send('assinatura inválida');
-  const type = req.query.type || req.query.topic || req.body?.type || req.body?.topic;
-  const id = req.query['data.id'] || req.body?.data?.id || (req.query.topic === 'payment' && req.query.id);
-  if (type !== 'payment' || !id || !process.env.MP_ACCESS_TOKEN) return res.status(200).send('ok');
-  try {
-    await handleMpNotification(id);
-    res.status(200).send('ok');
-  } catch (e) {
-    console.error('webhook MP', e.message);
-    res.status(500).send('erro'); // o provedor tenta novamente
-  }
-});
-
-// ---------- Pacote ----------
-app.post('/api/pacotes', rateLimit(20, 3600_000), uploadFields([{ name: 'logo', maxCount: 1 }]), (req, res) => {
-  try {
-    const idem = req.body.idem;
-    if (!isIdem(idem)) throw new UserError('Formulário expirado. Recarregue a página.');
-    const ex = get('SELECT access_token FROM packages WHERE idem_key = ?', idem);
-    if (ex) {
-      cleanupTmp(req);
-      return res.json({ redirect: `/pacote/${ex.access_token}`, duplicate: true });
-    }
-    const errors = {};
-    const d = {
-      name: clip(req.body.nome, 120), company: clip(req.body.empresa, 120), email: clip(req.body.email, 160).toLowerCase(),
-      whatsapp: onlyDigits(req.body.whatsapp).slice(0, 15), color: sanitizeColor(req.body.cor, '#1f2937'),
-    };
-    if (d.name.length < 2) errors.nome = 'Informe seu nome.';
-    if (d.company.length < 2) errors.empresa = 'Informe o nome da empresa.';
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(d.email)) errors.email = 'Informe um e-mail válido.';
-    if (d.whatsapp.length < 10 || d.whatsapp.length > 13) errors.whatsapp = 'Informe o WhatsApp com DDD.';
-    if (Object.keys(errors).length) throw new UserError('Revise os campos destacados.', 400, errors);
-    const logo = filesOf(req, 'logo')[0];
-    const logoInfo = logo && inspect(logo, 'logo');
-    if (logoInfo?.type === 'pdf') throw new UserError('Para a apresentação, envie a logo em PNG, JPG, WEBP ou SVG.', 400, { logo: 'Envie em PNG, JPG, WEBP ou SVG.' });
-    const s = getSettings();
-    const accessToken = tx(() => {
-      let id;
-      do id = shortCode('PK'); while (get('SELECT 1 FROM packages WHERE id = ?', id));
-      const t = token();
-      run(
-        `INSERT INTO packages (id, idem_key, access_token, name, company, email, whatsapp, brand_color, credits_total, price_cents, status, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,5,?,'aguardando_pagamento',?,?)`,
-        id, idem, t, d.name, d.company, d.email, d.whatsapp, d.color, s.price_package, nowIso(), nowIso(),
-      );
-      if (logo) store(logo, logoInfo, { ownerType: 'package', ownerId: id, role: 'logo' });
-      logEvent(id, 'cliente', 'Pacote de 5 simulações criado.');
-      return t;
-    });
-    res.json({ redirect: `/pacote/${accessToken}` });
-  } catch (e) {
-    jsonError(res, req, e);
-  }
-});
-
-const pkgByToken = (t) => get('SELECT * FROM packages WHERE access_token = ?', String(t || ''));
-const usedCredits = (pkgId) => get('SELECT COUNT(*) AS n FROM orders WHERE package_id = ?', pkgId).n;
-const remainingCredits = (pkg) => (pkg.status === 'pago' ? Math.max(0, pkg.credits_total - usedCredits(pkg.id)) : 0);
-
-app.get('/pacote/:token', (req, res) => {
-  const pkg = pkgByToken(req.params.token);
-  if (!pkg) return sendHtml(res, pub.messagePage({ title: 'Pacote não encontrado', text: 'Confira se o link está completo.' }), 404);
-  const briefings = all('SELECT * FROM orders WHERE package_id = ? ORDER BY created_at DESC', pkg.id);
-  sendHtml(res, pub.packagePage({ pkg, briefings, remaining: remainingCredits(pkg), baseUrl: baseUrl(req), req }));
-});
-app.get('/api/pacotes/:token/saldo', (req, res) => {
-  const pkg = pkgByToken(req.params.token);
-  if (!pkg) return res.status(404).json({ error: 'não encontrado' });
-  res.set('Cache-Control', 'no-store').json({ status: pkg.status, total: pkg.credits_total, usados: usedCredits(pkg.id), saldo: remainingCredits(pkg) });
-});
-app.post('/pacote/:token/pagar', async (req, res) => {
-  const pkg = pkgByToken(req.params.token);
-  if (!pkg) return res.status(404).send('Pacote não encontrado');
-  if (pkg.status !== 'aguardando_pagamento') return res.redirect(303, `/pacote/${pkg.access_token}`);
-  try {
-    res.redirect(303, await getOrCreateCheckout({ refType: 'package', refId: pkg.id, baseUrl: baseUrl(req), accessToken: pkg.access_token }));
-  } catch (e) {
-    sendHtml(res, pub.messagePage({ title: 'Pagamento indisponível', text: e.message }), e.status || 500);
-  }
-});
-app.get('/pacote/:token/briefing', (req, res) => {
-  const pkg = pkgByToken(req.params.token);
-  if (!pkg) return res.status(404).send('Pacote não encontrado');
-  const remaining = remainingCredits(pkg);
-  if (pkg.status !== 'pago' || remaining < 1) return res.redirect(`/pacote/${pkg.access_token}`);
-  sendHtml(res, pub.briefingFormPage({ pkg, remaining, idem: randomId() + randomId() }));
-});
-app.get('/pacote/:token/f/:fileId', (req, res) => {
-  const pkg = pkgByToken(req.params.token);
-  const f = pkg && get("SELECT * FROM files WHERE id = ? AND owner_type = 'package' AND owner_id = ?", req.params.fileId, pkg.id);
-  if (!f) return res.status(404).end();
-  sendStored(res, f);
-});
-
-// Envio de briefing do pacote: desconta 1 crédito de forma atômica e idempotente
-app.post('/api/pacotes/:token/briefings', rateLimit(30, 3600_000), uploadFields([{ name: 'fachada', maxCount: 1 }, { name: 'logo', maxCount: 1 }, { name: 'referencias', maxCount: 3 }]), (req, res) => {
-  try {
-    const pkg = pkgByToken(req.params.token);
-    if (!pkg) throw new UserError('Pacote não encontrado.', 404);
-    const idem = req.body.idem;
-    if (!isIdem(idem)) throw new UserError('Formulário expirado. Recarregue a página.');
-    const ex = get('SELECT id FROM orders WHERE idem_key = ? AND package_id = ?', idem, pkg.id);
-    if (ex) {
-      cleanupTmp(req);
-      return res.json({ redirect: `/pacote/${pkg.access_token}?msg=briefing_dup`, duplicate: true });
-    }
-    if (pkg.status !== 'pago') throw new UserError('O pagamento do pacote ainda não foi confirmado.', 409);
-    const { d, errors } = parseBriefing(req.body, { contact: false });
-    if (Object.keys(errors).length) throw new UserError('Revise os campos destacados.', 400, errors);
-    const files = inspectBriefingFiles(req);
-    tx(() => {
-      const fresh = get('SELECT * FROM packages WHERE id = ?', pkg.id);
-      if (usedCredits(pkg.id) >= fresh.credits_total) throw new UserError('Seu pacote não tem mais créditos disponíveis.', 409);
-      const id = insertOrder({ d: { ...d, name: pkg.name, email: pkg.email, whatsapp: pkg.whatsapp }, kind: 'pacote', packageId: pkg.id, idem, status: 'em_producao', price: 0 });
-      for (const f of files) store(f.file, f.info, { ownerType: 'order', ownerId: id, role: f.role });
-      logEvent(id, 'cliente', `Briefing enviado pelo pacote ${pkg.id}.`);
-      logEvent(pkg.id, 'cliente', `1 crédito usado no briefing ${id} (${d.store_name}).`);
-    });
-    res.json({ redirect: `/pacote/${pkg.access_token}?msg=briefing` });
-  } catch (e) {
-    jsonError(res, req, e);
-  }
-});
-
-// =====================================================================
-// ENTREGA (link privado)
-// =====================================================================
-function deliveryByToken(t) {
-  const o = get('SELECT * FROM orders WHERE delivery_token = ?', String(t || ''));
-  if (!o) return { error: 404 };
-  if (o.delivery_revoked) return { error: 410, order: o };
-  if (!o.delivered_at) return { error: 404 };
-  return { order: o };
-}
-function partnerBrand(order) {
-  if (order.kind !== 'pacote') return null;
-  const pkg = get('SELECT * FROM packages WHERE id = ?', order.package_id);
-  const logo = get("SELECT id FROM files WHERE owner_type = 'package' AND owner_id = ? AND role = 'logo'", pkg.id);
-  return { name: pkg.company, logoUrl: logo ? `/e/${order.delivery_token}/marca` : null, color: pkg.brand_color, href: '#' };
-}
-function deliveryError(res, r) {
-  if (r.error === 410) return sendHtml(res, pub.messagePage({ title: 'Link desativado', text: 'O acesso a esta simulação foi revogado. Peça um novo link para quem enviou.' }), 410);
-  return sendHtml(res, pub.messagePage({ title: 'Link não encontrado', text: 'Confira se o endereço está completo.' }), 404);
-}
-
-app.get('/e/:token', (req, res) => {
-  const r = deliveryByToken(req.params.token);
-  if (r.error) return deliveryError(res, r);
-  const order = r.order;
-  const original = get("SELECT * FROM files WHERE owner_type = 'order' AND owner_id = ? AND role = 'fachada'", order.id);
-  const props = all('SELECT * FROM proposals WHERE order_id = ? AND published = 1 ORDER BY slot, version DESC', order.id);
-  const slots = [];
-  for (const p of props) {
-    let sl = slots.find((x) => x.slot === p.slot);
-    if (!sl) slots.push((sl = { slot: p.slot, versions: [] }));
-    sl.versions.push(p);
-  }
-  const adjustment = get('SELECT * FROM adjustments WHERE order_id = ?', order.id);
-  const brand = partnerBrand(order);
-  res.set('Cache-Control', 'no-store');
-  sendHtml(res, pub.deliveryPage({ order, slots, original, adjustment, brand, baseUrl: baseUrl(req), req, partner: brand?.name }));
-});
-app.get('/e/:token/f/:fileId', (req, res) => {
-  const r = deliveryByToken(req.params.token);
-  if (r.error) return res.status(r.error).end();
-  const f = get(
-    `SELECT f.* FROM files f WHERE f.id = ? AND f.owner_type = 'order' AND f.owner_id = ?
-     AND (f.role = 'fachada' OR EXISTS (SELECT 1 FROM proposals p WHERE p.file_id = f.id AND p.published = 1))`,
-    req.params.fileId, r.order.id,
-  );
-  if (!f) return res.status(404).end();
-  sendStored(res, f, { download: req.query.dl === '1', noCache: true });
-});
-app.get('/e/:token/marca', (req, res) => {
-  const r = deliveryByToken(req.params.token);
-  if (r.error || r.order.kind !== 'pacote') return res.status(404).end();
-  const f = get("SELECT * FROM files WHERE owner_type = 'package' AND owner_id = ? AND role = 'logo'", r.order.package_id);
-  if (!f) return res.status(404).end();
-  sendStored(res, f);
-});
-const publishedSlot = (orderId, slot) => get('SELECT 1 FROM proposals WHERE order_id = ? AND slot = ? AND published = 1', orderId, slot);
-
-app.post('/e/:token/favorita', (req, res) => {
-  const r = deliveryByToken(req.params.token);
-  if (r.error) return deliveryError(res, r);
-  const slot = String(req.body.slot || '');
-  if (r.order.status === 'entregue' && publishedSlot(r.order.id, slot)) {
-    run("UPDATE orders SET chosen_slot = ?, updated_at = ? WHERE id = ? AND status = 'entregue'", slot, nowIso(), r.order.id);
-    logEvent(r.order.id, 'cliente', `Escolheu a proposta ${slot} como favorita.`);
-  }
-  res.redirect(303, `/e/${req.params.token}?msg=favorita#proposta-${slot}`);
-});
-app.post('/e/:token/ajuste', (req, res) => {
-  const r = deliveryByToken(req.params.token);
-  if (r.error) return deliveryError(res, r);
-  const o = r.order;
-  const slot = String(req.body.slot || '');
-  const desc = clip(req.body.descricao, 2000);
-  const back = (q) => res.redirect(303, `/e/${req.params.token}?${q}#ajuste`);
-  if (o.kind !== 'avulso') return back('msg=ajuste_avulso');
-  if (o.adjustment_used) return back('msg=ajuste'); // repetição: já registrado, nada é duplicado
-  if (!publishedSlot(o.id, slot)) return back('msg=ajuste_slot');
-  if (desc.length < 10) return back('msg=ajuste_curto');
-  const ok = tx(() => {
-    const u = run("UPDATE orders SET adjustment_used = 1, chosen_slot = ?, status = 'ajuste_solicitado', updated_at = ? WHERE id = ? AND adjustment_used = 0 AND status = 'entregue'", slot, nowIso(), o.id);
-    if (u.changes !== 1) return false;
-    run('INSERT INTO adjustments (order_id, slot, description, created_at) VALUES (?,?,?,?)', o.id, slot, desc, nowIso());
-    logEvent(o.id, 'cliente', `Solicitou ajuste na proposta ${slot}.`);
-    return true;
+/** Valor em reais no formato brasileiro (4.700 · 4.700,50 · 4700 · 4700.5) para centavos. */
+const parseCents = (s) => {
+  const t = String(s || '').replace(/[^\d,.]/g, '');
+  let n;
+  if (t.includes(',')) n = Number(t.replace(/\./g, '').replace(',', '.'));
+  else if (/^\d{1,3}(\.\d{3})+$/.test(t)) n = Number(t.replace(/\./g, ''));
+  else n = Number(t);
+  return t && Number.isFinite(n) ? Math.round(n * 100) : NaN;
+};
+app.post('/oportunidades/:id/proposta', auth.requireRole('prestador'), rateLimit(60, 3600_000), (req, res) => {
+  const o = loadOportunidade(req); if (!o) return notFound(req, res);
+  const b = req.body; const e = {};
+  const v = { valor: clip(b.valor, 20), prazo_dias: parseInt(b.prazo_dias, 10), inclui: clip(b.inclui, 3000), pagamento: clip(b.pagamento, 600), garantia: clip(b.garantia, 200), validade_dias: parseInt(b.validade_dias, 10) || 15 };
+  const cents = parseCents(v.valor);
+  if (!(cents >= 1000 && cents <= 100_000_000)) e.valor = 'Informe um valor entre R$ 10 e R$ 1.000.000.';
+  if (!(v.prazo_dias >= 1 && v.prazo_dias <= 365)) e.prazo_dias = 'Prazo entre 1 e 365 dias.';
+  if (v.inclui.length < 15) e.inclui = 'Descreva o que está incluído (pelo menos 15 caracteres).';
+  if (v.pagamento.length < 5) e.pagamento = 'Informe as condições de pagamento.';
+  if (!(v.validade_dias >= 1 && v.validade_dias <= 90)) e.validade_dias = 'Entre 1 e 90 dias.';
+  const errMsg = o.r.status !== 'aberto' ? 'Este pedido não está mais recebendo propostas.' : Object.keys(e).length ? 'Revise os campos: ' + Object.values(e).join(' ') : '';
+  if (errMsg) return send(res, V.oportunidade({ user: req.user, req, ...o, files: reqFiles(o.r.id), idem: token(), error: errMsg, v }), 400);
+  const t = nowIso();
+  const editing = o.mine && ['enviada', 'retirada'].includes(o.mine.status);
+  if (o.mine && !editing) return res.redirect(303, `/oportunidades/${o.r.id}`);
+  tx(() => {
+    if (editing) run(`UPDATE proposals SET valor_cents=?, prazo_dias=?, inclui=?, pagamento=?, garantia=?, validade_dias=?, status='enviada', updated_at=? WHERE id = ?`, cents, v.prazo_dias, v.inclui, v.pagamento, v.garantia, v.validade_dias, t, o.mine.id);
+    else run(`INSERT INTO proposals (id, request_id, prestador_id, valor_cents, prazo_dias, inclui, pagamento, garantia, validade_dias, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      shortCode('PR', 6), o.r.id, req.user.id, cents, v.prazo_dias, v.inclui, v.pagamento, v.garantia, v.validade_dias, t, t);
+    logEvent(o.r.id, nomeDe(req.user), editing ? 'Proposta atualizada.' : 'Proposta enviada.');
   });
-  back(ok ? 'msg=ajuste' : 'msg=ajuste_falha');
+  res.redirect(303, `/oportunidades/${o.r.id}?msg=${editing ? 'proposta_editada' : 'proposta'}`);
 });
-app.post('/e/:token/concluir', (req, res) => {
-  const r = deliveryByToken(req.params.token);
-  if (r.error) return deliveryError(res, r);
-  const u = run("UPDATE orders SET status = 'concluido', concluded_at = ?, updated_at = ? WHERE id = ? AND status = 'entregue' AND chosen_slot IS NOT NULL", nowIso(), nowIso(), r.order.id);
-  if (u.changes) logEvent(r.order.id, 'cliente', `Aprovou a proposta ${r.order.chosen_slot} e concluiu o pedido.`);
-  res.redirect(303, `/e/${req.params.token}?msg=aprovado`);
+app.post('/propostas/:id/retirar', auth.requireRole('prestador'), (req, res) => {
+  const p = get('SELECT * FROM proposals WHERE id = ? AND prestador_id = ?', req.params.id, req.user.id);
+  if (!p) return notFound(req, res);
+  if (p.status === 'enviada') run("UPDATE proposals SET status = 'retirada', updated_at = ? WHERE id = ?", nowIso(), p.id);
+  res.redirect(303, `/oportunidades/${p.request_id}?msg=retirada`);
 });
 
-// =====================================================================
-// PAINEL DA EQUIPE
-// =====================================================================
-app.get('/painel/login', (req, res) => {
-  if (auth.currentAdmin(req)) return res.redirect('/painel');
-  sendHtml(res, adm.loginPage({ volta: req.query.volta }));
+// ====================================================================
+// Conversa (empresa e prestador da proposta)
+// ====================================================================
+function loadProposalFor(req) {
+  const p = get(`SELECT p.*, COALESCE(u.empresa,u.nome) AS p_nome FROM proposals p JOIN users u ON u.id = p.prestador_id WHERE p.id = ?`, req.params.id);
+  if (!p) return null;
+  const r = get('SELECT * FROM requests WHERE id = ?', p.request_id);
+  if (req.user.id !== p.prestador_id && req.user.id !== r.empresa_id) return null;
+  return { p, r };
+}
+app.get('/propostas/:id/conversa', auth.requireRole('empresa', 'prestador'), (req, res) => {
+  const o = loadProposalFor(req); if (!o) return notFound(req, res);
+  const msgs = all('SELECT m.*, COALESCE(u.empresa,u.nome) AS a_nome FROM messages m JOIN users u ON u.id = m.author_id WHERE m.proposal_id = ? ORDER BY m.id', o.p.id);
+  const last = msgs.length ? msgs[msgs.length - 1].id : 0;
+  run('INSERT INTO reads (user_id, proposal_id, last_id) VALUES (?,?,?) ON CONFLICT(user_id, proposal_id) DO UPDATE SET last_id = excluded.last_id', req.user.id, o.p.id, last);
+  const other = req.user.id === o.p.prestador_id ? (get('SELECT empresa, nome FROM users WHERE id = ?', o.r.empresa_id).empresa || 'a empresa') : o.p.p_nome;
+  send(res, V.conversa({ user: req.user, ...o, msgs, other, idem: token() }));
 });
-app.post('/painel/login', (req, res) => {
-  const ip = req.ip;
-  const volta = String(req.body.volta || '');
-  const safeVolta = volta.startsWith('/painel') && !volta.startsWith('//') ? volta : '/painel';
-  if (!auth.loginAllowed(ip)) return sendHtml(res, adm.loginPage({ error: 'Muitas tentativas. Aguarde 15 minutos.', volta }), 429);
-  const a = get('SELECT * FROM admins WHERE email = ?', String(req.body.email || '').trim().toLowerCase());
-  if (!a || !auth.verifyPassword(String(req.body.senha || ''), a.pass_hash)) {
-    auth.loginFailed(ip);
-    return sendHtml(res, adm.loginPage({ error: 'E-mail ou senha incorretos.', volta }), 401);
+app.post('/propostas/:id/mensagens', auth.requireRole('empresa', 'prestador'), rateLimit(120, 3600_000), (req, res) => {
+  const o = loadProposalFor(req); if (!o) return notFound(req, res);
+  const body = clip(req.body.body, 2000);
+  if (body.length >= 1 && isIdem(req.body.idem) && !get('SELECT 1 FROM messages WHERE idem_key = ?', req.body.idem)) {
+    run('INSERT INTO messages (proposal_id, author_id, body, idem_key, created_at) VALUES (?,?,?,?,?)', o.p.id, req.user.id, body, req.body.idem, nowIso());
   }
-  auth.startSession(res, req, a.id);
-  res.redirect(303, safeVolta);
-});
-app.post('/painel/sair', (req, res) => {
-  auth.endSession(req, res);
-  res.redirect(303, '/painel/login');
+  res.redirect(303, `/propostas/${o.p.id}/conversa#fim`);
 });
 
-const P = express.Router();
-P.use(auth.requireAdmin);
-
-P.get('/', (req, res) => {
-  const status = ['aguardando_pagamento', 'em_producao', 'entregue', 'ajuste_solicitado', 'concluido'].includes(req.query.status) ? req.query.status : '';
-  const q = clip(req.query.q, 80);
-  const where = [];
-  const params = [];
-  if (status) { where.push('o.status = ?'); params.push(status); }
-  if (q) { where.push('(o.id LIKE ? OR o.store_name LIKE ? OR o.name LIKE ? OR o.email LIKE ? OR pk.company LIKE ?)'); params.push(...Array(5).fill(`%${q}%`)); }
-  const orders = all(
-    `SELECT o.*, pk.company,
-       (SELECT id FROM files f WHERE f.owner_type = 'order' AND f.owner_id = o.id AND f.role = 'fachada') AS thumb
-     FROM orders o LEFT JOIN packages pk ON pk.id = o.package_id
-     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-     ORDER BY CASE o.status WHEN 'ajuste_solicitado' THEN 0 WHEN 'em_producao' THEN 1 WHEN 'aguardando_pagamento' THEN 2 WHEN 'entregue' THEN 3 ELSE 4 END, o.created_at DESC LIMIT 300`,
-    ...params,
-  );
-  const counts = Object.fromEntries(all('SELECT status, COUNT(*) AS n FROM orders GROUP BY status').map((r) => [r.status, r.n]));
-  sendHtml(res, adm.ordersPage({ admin: req.admin, orders, counts, status, q, req }));
+// ====================================================================
+// Contrato
+// ====================================================================
+function buildContract(p, r) {
+  const empresa = get('SELECT * FROM users WHERE id = ?', r.empresa_id);
+  const prestador = get('SELECT * FROM users WHERE id = ?', p.prestador_id);
+  const id = shortCode('CT', 6); const createdAt = nowIso();
+  return { id, createdAt, texto: contractText({ id, req: r, prop: p, empresa, prestador, createdAt }) };
+}
+app.get('/propostas/:id/contrato', auth.requireRole('empresa'), (req, res) => {
+  const o = loadProposalFor(req); if (!o || o.r.empresa_id !== req.user.id) return notFound(req, res);
+  if (o.r.status !== 'aberto' || o.p.status !== 'enviada') return res.redirect(`/pedidos/${o.r.id}`);
+  const { texto } = buildContract(o.p, o.r);
+  send(res, V.contratoPreview({ user: req.user, ...o, texto: texto.replace(/Nº CT-\w+/, 'Nº (gerado ao aceitar)') }));
+});
+app.post('/propostas/:id/aceitar', auth.requireRole('empresa'), (req, res) => {
+  const o = loadProposalFor(req); if (!o || o.r.empresa_id !== req.user.id) return notFound(req, res);
+  if (!req.body.aceite) return res.redirect(303, `/propostas/${o.p.id}/contrato`);
+  let cid = null;
+  tx(() => {
+    const r = get('SELECT * FROM requests WHERE id = ?', o.r.id); const p = get('SELECT * FROM proposals WHERE id = ?', o.p.id);
+    if (r.status !== 'aberto' || p.status !== 'enviada') return;
+    const c = buildContract(p, r); cid = c.id;
+    run(`INSERT INTO contracts (id, request_id, proposal_id, empresa_id, prestador_id, texto, texto_hash, valor_cents, empresa_aceite_at, empresa_aceite_ip, empresa_aceite_ua, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, c.id, r.id, p.id, r.empresa_id, p.prestador_id, c.texto, sha256(c.texto), p.valor_cents, c.createdAt, req.ip, ua(req), c.createdAt, c.createdAt);
+    run("UPDATE requests SET status = 'em_contratacao', updated_at = ? WHERE id = ?", c.createdAt, r.id);
+    run("UPDATE proposals SET status = 'aceita', updated_at = ? WHERE id = ?", c.createdAt, p.id);
+    logEvent(r.id, nomeDe(req.user), `Proposta ${p.id} aceita; contrato ${c.id} assinado pela contratante.`);
+  });
+  if (!cid) { const c = get("SELECT id FROM contracts WHERE proposal_id = ? AND status <> 'cancelado'", o.p.id); return res.redirect(303, c ? `/contratos/${c.id}` : `/pedidos/${o.r.id}`); }
+  res.redirect(303, `/contratos/${cid}?msg=aceita`);
 });
 
-P.get('/arquivo/:id', (req, res) => {
+function loadContract(req) {
+  const c = get('SELECT c.*, r.titulo FROM contracts c JOIN requests r ON r.id = c.request_id WHERE c.id = ?', req.params.id);
+  if (!c || (req.user.id !== c.empresa_id && req.user.id !== c.prestador_id && req.user.role !== 'admin')) return null;
+  return c;
+}
+app.get('/contratos/:id', auth.requireRole(), (req, res) => {
+  const c = loadContract(req); if (!c) return notFound(req, res);
+  const pick = (id) => get('SELECT id, nome, empresa, email, whatsapp, doc_tipo, documento, cidade, uf FROM users WHERE id = ?', id);
+  const review = get('SELECT * FROM reviews WHERE contract_id = ?', c.id);
+  const canReview = req.user.id === c.empresa_id && c.status === 'concluido' && !review;
+  send(res, V.contrato({ user: req.user, req, c, texto: c.texto, empresa: pick(c.empresa_id), prestador: pick(c.prestador_id), review, canReview }));
+});
+function contractAction(role, fn) {
+  return [auth.requireRole(role), (req, res) => {
+    const c = loadContract(req); if (!c || req.user.id !== (role === 'empresa' ? c.empresa_id : c.prestador_id)) return notFound(req, res);
+    const msg = tx(() => fn(get('SELECT * FROM contracts WHERE id = ?', c.id), req));
+    res.redirect(303, `/contratos/${c.id}${msg ? '?msg=' + msg : ''}`);
+  }];
+}
+app.post('/contratos/:id/assinar', ...contractAction('prestador', (c, req) => {
+  if (c.status !== 'aguardando_prestador' || !req.body.aceite) return '';
+  const t = nowIso();
+  run("UPDATE contracts SET status = 'vigente', prestador_aceite_at = ?, prestador_aceite_ip = ?, prestador_aceite_ua = ?, updated_at = ? WHERE id = ?", t, req.ip, ua(req), t, c.id);
+  run("UPDATE requests SET status = 'contratado', updated_at = ? WHERE id = ?", t, c.request_id);
+  run("UPDATE proposals SET status = 'recusada', updated_at = ? WHERE request_id = ? AND id <> ? AND status = 'enviada'", t, c.request_id, c.proposal_id);
+  logEvent(c.request_id, nomeDe(req.user), `Contrato ${c.id} assinado pela contratada. Em vigor.`);
+  return 'assinado';
+}));
+app.post('/contratos/:id/recusar', ...contractAction('prestador', (c, req) => {
+  if (c.status !== 'aguardando_prestador') return '';
+  const t = nowIso();
+  run("UPDATE contracts SET status = 'cancelado', cancelado_por = ?, cancelado_motivo = 'Recusado pela contratada', updated_at = ? WHERE id = ?", req.user.id, t, c.id);
+  run("UPDATE proposals SET status = 'recusada', updated_at = ? WHERE id = ?", t, c.proposal_id);
+  run("UPDATE requests SET status = 'aberto', updated_at = ? WHERE id = ?", t, c.request_id);
+  logEvent(c.request_id, nomeDe(req.user), `Contrato ${c.id} recusado pela contratada.`);
+  return 'recusado';
+}));
+app.post('/contratos/:id/desistir', ...contractAction('empresa', (c, req) => {
+  if (c.status !== 'aguardando_prestador') return '';
+  const t = nowIso();
+  run("UPDATE contracts SET status = 'cancelado', cancelado_por = ?, cancelado_motivo = 'Desistência da contratante antes da assinatura', updated_at = ? WHERE id = ?", req.user.id, t, c.id);
+  run("UPDATE proposals SET status = 'enviada', updated_at = ? WHERE id = ?", t, c.proposal_id);
+  run("UPDATE requests SET status = 'aberto', updated_at = ? WHERE id = ?", t, c.request_id);
+  logEvent(c.request_id, nomeDe(req.user), `Contrato ${c.id} cancelado pela contratante antes da assinatura.`);
+  return 'desistiu';
+}));
+app.post('/contratos/:id/concluir', ...contractAction('empresa', (c, req) => {
+  if (c.status !== 'vigente') return '';
+  const t = nowIso();
+  run("UPDATE contracts SET status = 'concluido', concluido_at = ?, updated_at = ? WHERE id = ?", t, t, c.id);
+  run("UPDATE requests SET status = 'concluido', updated_at = ? WHERE id = ?", t, c.request_id);
+  logEvent(c.request_id, nomeDe(req.user), 'Serviço concluído.');
+  return 'concluido';
+}));
+app.post('/contratos/:id/avaliar', ...contractAction('empresa', (c, req) => {
+  const nota = parseInt(req.body.nota, 10);
+  if (c.status !== 'concluido' || !(nota >= 1 && nota <= 5) || get('SELECT 1 FROM reviews WHERE contract_id = ?', c.id)) return '';
+  run('INSERT INTO reviews (contract_id, prestador_id, empresa_id, nota, comentario, created_at) VALUES (?,?,?,?,?,?)', c.id, c.prestador_id, c.empresa_id, nota, clip(req.body.comentario, 1000), nowIso());
+  return 'avaliado';
+}));
+
+// ====================================================================
+// Perfil público do prestador (para usuários logados)
+// ====================================================================
+app.get('/prestadores/:id', auth.requireRole(), (req, res) => {
+  const p = get("SELECT * FROM users WHERE id = ? AND role = 'prestador' AND blocked = 0", req.params.id);
+  if (!p) return notFound(req, res);
+  const reviews = all('SELECT rv.*, COALESCE(u.empresa,u.nome) AS e_nome FROM reviews rv JOIN users u ON u.id = rv.empresa_id WHERE rv.prestador_id = ? ORDER BY rv.created_at DESC LIMIT 50', p.id);
+  const feitos = get("SELECT COUNT(*) AS n FROM contracts WHERE prestador_id = ? AND status = 'concluido'", p.id).n;
+  send(res, V.perfilPrestador({ user: req.user, p, rev: ratingOf(p.id), reviews, feitos }));
+});
+
+// ====================================================================
+// Arquivos privados
+// ====================================================================
+app.get('/arquivos/:id', auth.requireRole(), (req, res) => {
   const f = get('SELECT * FROM files WHERE id = ?', req.params.id);
-  if (!f) return res.status(404).end();
-  sendStored(res, f, { download: req.query.dl === '1' });
+  if (!f || f.owner_type !== 'pedido') return notFound(req, res);
+  const r = get('SELECT * FROM requests WHERE id = ?', f.owner_id);
+  const u = req.user;
+  const ok = u.role === 'admin' || u.id === r.empresa_id
+    || (u.role === 'prestador' && (r.status === 'aberto' || get('SELECT 1 FROM proposals WHERE request_id = ? AND prestador_id = ?', r.id, u.id)));
+  if (!ok) return notFound(req, res);
+  sendStored(res, f, { download: req.query.baixar === '1' });
 });
 
-function loadOrder(req, res) {
-  const o = get('SELECT * FROM orders WHERE id = ?', req.params.id);
-  if (!o) res.status(404).send('Pedido não encontrado');
-  return o;
-}
-function waMessageFor(order, pkg, base) {
-  const s = getSettings();
-  const first = (order.name || pkg?.name || '').split(' ')[0];
-  const link = order.delivery_token && !order.delivery_revoked ? `${base}/e/${order.delivery_token}` : null;
-  const track = `${base}/pedido/${order.id}?t=${order.access_token}`;
-  const hi = `Olá${first ? `, ${first}` : ''}! Aqui é da ${s.brand_name}.`;
-  if (order.status === 'aguardando_pagamento') return `${hi}\n\nRecebemos o pedido ${order.id} da simulação da fachada da ${order.store_name}. Para começarmos, falta só concluir o pagamento por aqui:\n${track}`;
-  if (!link || order.status === 'em_producao') return `${hi}\n\nO pedido ${order.id} (${order.store_name}) está em produção. Avisamos assim que as propostas estiverem prontas.\n\nAcompanhe: ${pkg ? `${base}/pacote/${pkg.access_token}` : track}`;
-  if (order.adjustment_used && order.status === 'entregue') return `${hi}\n\nA versão revisada da proposta ${order.chosen_slot} da ${order.store_name} está pronta, no mesmo link:\n${link}`;
-  if (pkg) return `${hi}\n\nAs simulações da ${order.store_name} (pedido ${order.id}) estão prontas, já com a marca da ${pkg.company} para você apresentar ao seu cliente:\n${link}`;
-  return `${hi}\n\nAs simulações da fachada da ${order.store_name} estão prontas. Veja as propostas e compare o antes e depois neste link privado:\n${link}\n\nPor lá você escolhe sua favorita e, se quiser, pede um ajuste. Pode compartilhar o link com quem vai produzir a placa.`;
-}
-
-P.get('/pedido/:id', (req, res) => {
-  const order = loadOrder(req, res);
-  if (!order) return;
-  const pkg = order.package_id ? get('SELECT * FROM packages WHERE id = ?', order.package_id) : null;
-  const files = all("SELECT * FROM files WHERE owner_type = 'order' AND owner_id = ? AND role != 'proposta' ORDER BY CASE role WHEN 'fachada' THEN 0 WHEN 'logo' THEN 1 ELSE 2 END, created_at", order.id);
-  const proposals = all('SELECT * FROM proposals WHERE order_id = ? ORDER BY slot, version', order.id);
-  const adjustment = get('SELECT * FROM adjustments WHERE order_id = ?', order.id);
-  const events = all('SELECT * FROM events WHERE ref_id = ? ORDER BY id DESC', order.id);
-  const base = baseUrl(req);
-  sendHtml(res, adm.orderDetailPage({
-    admin: req.admin, order, pkg, files, proposals, adjustment, events, req,
-    deliveryUrl: order.delivery_token ? `${base}/e/${order.delivery_token}` : '',
-    orderUrl: pkg ? `${base}/pacote/${pkg.access_token}` : `${base}/pedido/${order.id}?t=${order.access_token}`,
-    idem: randomId() + randomId(),
-    waMessage: waMessageFor(order, pkg, base),
-    contactPhone: order.whatsapp || pkg?.whatsapp || '',
-  }));
+// ====================================================================
+// Administração
+// ====================================================================
+app.get('/admin', auth.requireRole('admin'), (req, res) => {
+  const counts = {
+    empresa: get("SELECT COUNT(*) AS n FROM users WHERE role='empresa'").n, prestador: get("SELECT COUNT(*) AS n FROM users WHERE role='prestador'").n,
+    pedidos: get('SELECT COUNT(*) AS n FROM requests').n, contratos: get("SELECT COUNT(*) AS n FROM contracts WHERE status IN ('vigente','concluido')").n,
+  };
+  const users = all("SELECT id, role, email, nome, empresa, doc_tipo, documento, cidade, uf, blocked, created_at FROM users ORDER BY created_at DESC LIMIT 300");
+  const requests = all(`SELECT r.*, COALESCE(u.empresa,u.nome) AS e_nome, (SELECT COUNT(*) FROM proposals p WHERE p.request_id = r.id AND p.status <> 'retirada') AS n_prop
+    FROM requests r JOIN users u ON u.id = r.empresa_id ORDER BY r.created_at DESC LIMIT 100`);
+  send(res, V.admin({ user: req.user, req, users, requests, counts }));
+});
+app.post('/admin/usuarios/:id/:acao', auth.requireRole('admin'), (req, res) => {
+  const block = req.params.acao === 'bloquear' ? 1 : req.params.acao === 'desbloquear' ? 0 : null;
+  if (block === null) return notFound(req, res);
+  run("UPDATE users SET blocked = ?, updated_at = ? WHERE id = ? AND role <> 'admin'", block, nowIso(), req.params.id);
+  if (block) run('DELETE FROM sessions WHERE user_id = ?', req.params.id);
+  res.redirect(303, `/admin?msg=${block ? 'bloqueado' : 'desbloqueado'}`);
 });
 
-P.post('/pedido/:id/pagamento', (req, res) => {
-  const order = loadOrder(req, res);
-  if (!order) return;
-  if (req.body.confirmo !== '1') return res.redirect(303, `/painel/pedido/${order.id}?erro=${encodeURIComponent('Confirme que conferiu o recebimento.')}`);
-  const r = confirmPayment({ refType: 'order', refId: order.id, provider: 'manual', providerPaymentId: `manual-${order.id}`, method: clip(req.body.forma, 30), note: clip(req.body.obs, 200), actor: req.admin.email });
-  res.redirect(303, `/painel/pedido/${order.id}?msg=${r.already ? 'pago_ja' : 'pago'}`);
-});
-
-const proposalUpload = upload.single('imagem');
-P.post('/pedido/:id/propostas', (req, res, next) => proposalUpload(req, res, (err) => {
-  if (err) { cleanupTmp(req); return res.redirect(303, `/painel/pedido/${req.params.id}?erro=${encodeURIComponent('Arquivo grande demais (limite de 20 MB).')}`); }
-  next();
-}), (req, res) => {
-  const order = loadOrder(req, res);
-  if (!order) return cleanupTmp(req);
-  const back = (q) => res.redirect(303, `/painel/pedido/${order.id}?${q}`);
-  try {
-    if (order.status === 'aguardando_pagamento') throw new UserError('Registre o pagamento antes de enviar propostas.');
-    const idem = String(req.body.idem || '');
-    if (isIdem(idem) && get('SELECT 1 FROM proposals WHERE idem_key = ?', idem)) { cleanupTmp(req); return back('msg=proposta_dup'); }
-    const slot = ['A', 'B', 'C'].includes(req.body.slot) ? req.body.slot : 'A';
-    if (!req.file) throw new UserError('Escolha a imagem da proposta.');
-    const info = inspect(req.file, 'proposta');
-    tx(() => {
-      const fileId = store(req.file, info, { ownerType: 'order', ownerId: order.id, role: 'proposta' });
-      const v = (get('SELECT MAX(version) AS v FROM proposals WHERE order_id = ? AND slot = ?', order.id, slot).v || 0) + 1;
-      run('INSERT INTO proposals (order_id, slot, version, file_id, title, note, idem_key, created_at) VALUES (?,?,?,?,?,?,?,?)',
-        order.id, slot, v, fileId, clip(req.body.titulo, 80) || null, clip(req.body.nota, 400) || null, isIdem(idem) ? idem : null, nowIso());
-      logEvent(order.id, req.admin.email, `Enviou a proposta ${slot} (versão ${v}).`);
-    });
-    back('msg=proposta');
-  } catch (e) {
-    cleanupTmp(req);
-    if (!(e instanceof UserError)) console.error(e);
-    back('erro=' + encodeURIComponent(e instanceof UserError ? e.message : 'Falha ao enviar a imagem.'));
-  }
-});
-
-P.post('/pedido/:id/propostas/:pid/remover', (req, res) => {
-  const order = loadOrder(req, res);
-  if (!order) return;
-  const p = get('SELECT * FROM proposals WHERE id = ? AND order_id = ?', req.params.pid, order.id);
-  if (p) {
-    tx(() => {
-      run('DELETE FROM proposals WHERE id = ?', p.id);
-      removeFile(p.file_id);
-      logEvent(order.id, req.admin.email, `Removeu a proposta ${p.slot} (versão ${p.version}).`);
-    });
-  }
-  res.redirect(303, `/painel/pedido/${order.id}?msg=proposta_removida`);
-});
-
-P.post('/pedido/:id/publicar', (req, res) => {
-  const order = loadOrder(req, res);
-  if (!order) return;
-  const back = (q) => res.redirect(303, `/painel/pedido/${order.id}?${q}`);
-  try {
-    const msg = tx(() => {
-      const o = get('SELECT * FROM orders WHERE id = ?', order.id);
-      const pending = all('SELECT * FROM proposals WHERE order_id = ? AND published = 0', o.id);
-      if (!pending.length) throw new UserError('Não há imagens novas para publicar.');
-      if (o.status === 'aguardando_pagamento') throw new UserError('O pagamento ainda não foi confirmado.');
-      if (o.status === 'ajuste_solicitado' && !pending.some((p) => p.slot === o.chosen_slot)) throw new UserError(`Envie a versão revisada da proposta ${o.chosen_slot} antes de publicar.`);
-      run('UPDATE proposals SET published = 1 WHERE order_id = ? AND published = 0', o.id);
-      const tokenD = o.delivery_token || token();
-      if (o.status === 'ajuste_solicitado') {
-        run("UPDATE orders SET status = 'entregue', updated_at = ? WHERE id = ?", nowIso(), o.id);
-        run("UPDATE adjustments SET status = 'atendido', resolved_at = ? WHERE order_id = ?", nowIso(), o.id);
-        logEvent(o.id, req.admin.email, 'Publicou a versão revisada.');
-        return 'revisao';
-      }
-      run(`UPDATE orders SET delivery_token = ?, status = CASE WHEN status = 'em_producao' THEN 'entregue' ELSE status END,
-           delivered_at = COALESCE(delivered_at, ?), updated_at = ? WHERE id = ?`, tokenD, nowIso(), nowIso(), o.id);
-      logEvent(o.id, req.admin.email, o.delivered_at ? 'Publicou imagens novas na entrega.' : 'Publicou a entrega.');
-      return 'publicado';
-    });
-    back(`msg=${msg}`);
-  } catch (e) {
-    back('erro=' + encodeURIComponent(e.message));
-  }
-});
-
-P.post('/pedido/:id/link/revogar', (req, res) => {
-  const order = loadOrder(req, res);
-  if (!order) return;
-  run('UPDATE orders SET delivery_revoked = 1, updated_at = ? WHERE id = ?', nowIso(), order.id);
-  logEvent(order.id, req.admin.email, 'Revogou o link de entrega.');
-  res.redirect(303, `/painel/pedido/${order.id}?msg=revogado`);
-});
-P.post('/pedido/:id/link/novo', (req, res) => {
-  const order = loadOrder(req, res);
-  if (!order) return;
-  run('UPDATE orders SET delivery_token = ?, delivery_revoked = 0, updated_at = ? WHERE id = ? AND delivery_revoked = 1', token(), nowIso(), order.id);
-  logEvent(order.id, req.admin.email, 'Gerou um novo link de entrega.');
-  res.redirect(303, `/painel/pedido/${order.id}?msg=novo_link`);
-});
-P.post('/pedido/:id/status', (req, res) => {
-  const order = loadOrder(req, res);
-  if (!order) return;
-  if (req.body.acao === 'concluir' && ['entregue', 'ajuste_solicitado'].includes(order.status)) {
-    run("UPDATE orders SET status = 'concluido', concluded_at = ?, updated_at = ? WHERE id = ?", nowIso(), nowIso(), order.id);
-    logEvent(order.id, req.admin.email, 'Marcou o pedido como concluído.');
-    return res.redirect(303, `/painel/pedido/${order.id}?msg=concluido`);
-  }
-  if (req.body.acao === 'reabrir' && order.status === 'concluido') {
-    run("UPDATE orders SET status = 'entregue', concluded_at = NULL, updated_at = ? WHERE id = ?", nowIso(), order.id);
-    logEvent(order.id, req.admin.email, 'Reabriu o pedido.');
-    return res.redirect(303, `/painel/pedido/${order.id}?msg=reaberto`);
-  }
-  res.redirect(303, `/painel/pedido/${order.id}`);
-});
-
-// ---------- Pacotes (painel) ----------
-P.get('/pacotes', (req, res) => {
-  const packages = all('SELECT p.*, (SELECT COUNT(*) FROM orders o WHERE o.package_id = p.id) AS used FROM packages p ORDER BY created_at DESC LIMIT 300');
-  sendHtml(res, adm.packagesPage({ admin: req.admin, packages, req }));
-});
-P.get('/pacote/:id', (req, res) => {
-  const pkg = get('SELECT * FROM packages WHERE id = ?', req.params.id);
-  if (!pkg) return res.status(404).send('Pacote não encontrado');
-  const briefings = all('SELECT * FROM orders WHERE package_id = ? ORDER BY created_at DESC', pkg.id);
-  const logo = get("SELECT * FROM files WHERE owner_type = 'package' AND owner_id = ? AND role = 'logo'", pkg.id);
-  const events = all('SELECT * FROM events WHERE ref_id = ? ORDER BY id DESC', pkg.id);
-  const link = `${baseUrl(req)}/pacote/${pkg.access_token}`;
-  const s = getSettings();
-  const first = pkg.name.split(' ')[0];
-  const waMessage = pkg.status === 'pago'
-    ? `Olá, ${first}! Aqui é da ${s.brand_name}. Os 5 créditos do seu pacote estão liberados. Consulte o saldo e envie os briefings, um de cada vez, por este link:\n${link}`
-    : `Olá, ${first}! Aqui é da ${s.brand_name}. Recebemos o pedido do pacote ${pkg.id}. Para liberar os 5 créditos, falta concluir o pagamento:\n${link}`;
-  sendHtml(res, adm.packageDetailPage({ admin: req.admin, pkg, briefings, logo, link, req, events, waMessage }));
-});
-P.post('/pacote/:id/pagamento', (req, res) => {
-  const pkg = get('SELECT * FROM packages WHERE id = ?', req.params.id);
-  if (!pkg) return res.status(404).send('Pacote não encontrado');
-  if (req.body.confirmo !== '1') return res.redirect(303, `/painel/pacote/${pkg.id}?erro=${encodeURIComponent('Confirme que conferiu o recebimento.')}`);
-  const r = confirmPayment({ refType: 'package', refId: pkg.id, provider: 'manual', providerPaymentId: `manual-${pkg.id}`, method: clip(req.body.forma, 30), note: clip(req.body.obs, 200), actor: req.admin.email });
-  res.redirect(303, `/painel/pacote/${pkg.id}?msg=${r.already ? 'pago_ja' : 'pago'}`);
-});
-
-// ---------- Configurações ----------
-const envInfo = (req) => ({ mp: !!process.env.MP_ACCESS_TOKEN, providerLocked: !!process.env.PAYMENT_PROVIDER, webhookUrl: `${baseUrl(req)}/webhooks/mercadopago` });
-P.get('/config', (req, res) => sendHtml(res, adm.configPage({ admin: req.admin, admins: auth.listAdmins(), req, envInfo: envInfo(req) })));
-const brandUpload = upload.single('logo');
-P.post('/config', (req, res, next) => brandUpload(req, res, (err) => {
-  if (err) { cleanupTmp(req); return res.redirect(303, `/painel/config?erro=${encodeURIComponent('Logo grande demais.')}`); }
-  next();
-}), (req, res) => {
-  try {
-    const b = req.body;
-    const s = getSettings();
-    if (req.file) {
-      const info = inspect(req.file, 'marca');
-      const id = store(req.file, info, { ownerType: 'settings', ownerId: 'brand', role: 'marca' });
-      if (s.brand_logo_file) removeFile(s.brand_logo_file);
-      setSetting('brand_logo_file', id);
-    } else if (b.remover_logo === '1' && s.brand_logo_file) {
-      removeFile(s.brand_logo_file);
-      setSetting('brand_logo_file', '');
-    }
-    setSetting('brand_name', clip(b.brand_name, 60) || 'Fachada em Vista');
-    setSetting('brand_color', sanitizeColor(b.brand_color, s.brand_color));
-    setSetting('contact_whatsapp', onlyDigits(b.contact_whatsapp));
-    const pu = clip(b.public_url, 200);
-    if (pu && !/^https?:\/\/[^\s/]+/.test(pu)) throw new UserError('Endereço público inválido.');
-    setSetting('public_url', pu.replace(/\/$/, ''));
-    if (!process.env.PAYMENT_PROVIDER && ['demo', 'link', 'mercadopago'].includes(b.payment_provider)) setSetting('payment_provider', b.payment_provider);
-    for (const k of ['payment_link_single', 'payment_link_package']) {
-      const v = clip(b[k], 400);
-      if (v && !/^https:\/\//.test(v)) throw new UserError('Os links de pagamento devem começar com https://');
-      setSetting(k, v);
-    }
-    const money = (v, d) => { const n = Math.round(parseFloat(String(v || '').replace(/\./g, '').replace(',', '.')) * 100); return n > 0 ? n : d; };
-    setSetting('price_single_cents', money(b.price_single, s.price_single));
-    setSetting('price_package_cents', money(b.price_package, s.price_package));
-    res.redirect(303, '/painel/config?msg=config');
-  } catch (e) {
-    cleanupTmp(req);
-    res.redirect(303, '/painel/config?erro=' + encodeURIComponent(e instanceof UserError ? e.message : 'Falha ao salvar.'));
-  }
-});
-P.post('/config/senha', (req, res) => {
-  const a = get('SELECT * FROM admins WHERE id = ?', req.admin.id);
-  if (!auth.verifyPassword(String(req.body.atual || ''), a.pass_hash)) return res.redirect(303, '/painel/config?erro=' + encodeURIComponent('Senha atual incorreta.'));
-  const nova = String(req.body.nova || '');
-  if (nova.length < 10) return res.redirect(303, '/painel/config?erro=' + encodeURIComponent('A nova senha precisa de pelo menos 10 caracteres.'));
-  run('UPDATE admins SET pass_hash = ? WHERE id = ?', auth.hashPassword(nova), a.id);
-  setSetting('admin_demo_password', '0');
-  res.redirect(303, '/painel/config?msg=senha');
-});
-P.post('/config/equipe', (req, res) => {
-  const email = clip(req.body.email, 160).toLowerCase();
-  const senha = String(req.body.senha || '');
-  if (!/^[^\s@]+@[^\s@]+$/.test(email) || senha.length < 10) return res.redirect(303, '/painel/config?erro=' + encodeURIComponent('Informe e-mail válido e senha com 10+ caracteres.'));
-  if (get('SELECT 1 FROM admins WHERE email = ?', email)) return res.redirect(303, '/painel/config?erro=' + encodeURIComponent('Este e-mail já tem acesso.'));
-  run('INSERT INTO admins (email, name, pass_hash, created_at) VALUES (?,?,?,?)', email, clip(req.body.nome, 80), auth.hashPassword(senha), nowIso());
-  res.redirect(303, '/painel/config?msg=membro');
-});
-
-app.use('/painel', P);
-
-app.use((req, res) => sendHtml(res, pub.messagePage({ title: 'Página não encontrada', text: 'O endereço pode estar incompleto.' }), 404));
-app.use((err, req, res, next) => {
+app.get('/saude', (req, res) => res.json({ ok: true }));
+app.use((req, res) => notFound(req, res));
+app.use((err, req, res, _next) => {
   console.error(err);
   cleanupTmp(req);
-  if (req.path.startsWith('/api/')) return res.status(500).json({ error: 'Erro inesperado. Tente novamente.' });
-  sendHtml(res, pub.messagePage({ title: 'Algo deu errado', text: 'Tente novamente em instantes.' }), 500);
+  if (wantsJson(req)) return res.status(500).json({ error: 'Erro inesperado. Tente novamente.' });
+  send(res, V.erro({ user: req.user, titulo: 'Algo deu errado', texto: 'Tente novamente em instantes.' }), 500);
 });
 
 const PORT = Number(process.env.PORT || 3000);
-app.listen(PORT, () => console.log(`[Fachada em Vista] rodando em http://localhost:${PORT}  (pagamento: ${getSettings().payment_provider})`));
-
-process.on('SIGTERM', () => { db.close(); process.exit(0); });
+if (process.env.NODE_ENV !== 'test') app.listen(PORT, () => console.log(`Fachada em Vista em http://localhost:${PORT}`));

@@ -1,43 +1,64 @@
-import { html, raw, sanitizeColor, contrastText, formatBRL } from '../util.js';
-import { getSettings } from '../db.js';
-
-export const STATUS = {
-  aguardando_pagamento: 'Aguardando pagamento',
-  em_producao: 'Em produção',
-  entregue: 'Entregue',
-  ajuste_solicitado: 'Ajuste solicitado',
-  concluido: 'Concluído',
-  pago: 'Pago',
-};
-export const CHANGE_TYPES = {
-  placa: 'Troca de placa',
-  letreiro: 'Letreiro iluminado',
-  pintura: 'Pintura',
-  revestimento: 'Revestimento',
-  outra: 'Outra alteração',
-};
-export const PRESERVE = { portas: 'Portas', vitrines: 'Vitrines', janelas: 'Janelas' };
-
-export const statusBadge = (s) => html`<span class="badge badge-${s}">${STATUS[s] || s}</span>`;
-
-export const DISCLAIMER = 'Simulação visual. Confira medidas, materiais e instalação com a empresa responsável pela produção.';
+import { html, raw, sanitizeColor, contrastText } from '../util.js';
+import { getSettings, get } from '../db.js';
 
 const GLYPH = raw('<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 9l1.5-5h15L21 9M3 9h18M3 9v1.5a3 3 0 006 0 3 3 0 006 0 3 3 0 006 0V9M5 13v7h14v-7M10 20v-4h4v4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>');
-export function brandMark({ name, logoUrl, href = '/' }) {
-  return html`<a class="brand" href="${href}">
-    ${logoUrl ? html`<img src="${logoUrl}" alt="${name}" class="brand-logo">` : html`<span class="brand-glyph">${GLYPH}</span><span class="brand-name">${name}</span>`}
-  </a>`;
+
+/** Contadores para a navegação (mensagens não lidas e itens que pedem ação). */
+function navCounts(u) {
+  if (u.role === 'empresa') {
+    return {
+      msgs: get(`SELECT COUNT(*) AS n FROM messages m JOIN proposals p ON p.id = m.proposal_id JOIN requests r ON r.id = p.request_id
+        LEFT JOIN reads rd ON rd.user_id = ? AND rd.proposal_id = p.id
+        WHERE r.empresa_id = ? AND m.author_id <> ? AND m.id > COALESCE(rd.last_id, 0)`, u.id, u.id, u.id).n,
+    };
+  }
+  if (u.role === 'prestador') {
+    return {
+      msgs: get(`SELECT COUNT(*) AS n FROM messages m JOIN proposals p ON p.id = m.proposal_id
+        LEFT JOIN reads rd ON rd.user_id = ? AND rd.proposal_id = p.id
+        WHERE p.prestador_id = ? AND m.author_id <> ? AND m.id > COALESCE(rd.last_id, 0)`, u.id, u.id, u.id).n,
+      assinar: get("SELECT COUNT(*) AS n FROM contracts WHERE prestador_id = ? AND status = 'aguardando_prestador'", u.id).n,
+    };
+  }
+  return {};
+}
+const dot = (n) => (n ? html` <span class="count" aria-label="${n} novos">${n}</span>` : '');
+
+function nav(u, active) {
+  const cur = (k) => (active === k ? raw(' aria-current="page"') : '');
+  if (!u) {
+    return html`<nav class="nav" aria-label="Menu">
+      <a href="/criar"${cur('criar')}>Simular fachada</a>
+      <a href="/para-prestadores"${cur('prest')}>Sou prestador</a>
+      <a href="/entrar"${cur('entrar')}>Entrar</a>
+      <a class="btn btn-sm btn-primary" href="/cadastro?tipo=empresa">Cadastrar</a>
+    </nav>`;
+  }
+  const c = navCounts(u);
+  const out = html`<form method="post" action="/sair" class="inline"><button class="linklike">Sair</button></form>`;
+  if (u.role === 'empresa') {
+    return html`<nav class="nav" aria-label="Menu">
+      <a href="/painel"${cur('painel')}>Meus pedidos${dot(c.msgs)}</a>
+      <a href="/pedidos/novo"${cur('novo')}>Novo pedido</a>
+      <a href="/criar"${cur('criar')}>Simular</a>
+      <a href="/conta"${cur('conta')}>Conta</a>${out}
+    </nav>`;
+  }
+  if (u.role === 'prestador') {
+    return html`<nav class="nav" aria-label="Menu">
+      <a href="/oportunidades"${cur('oport')}>Oportunidades</a>
+      <a href="/painel"${cur('painel')}>Minhas propostas${dot(c.msgs + c.assinar)}</a>
+      <a href="/conta"${cur('conta')}>Perfil</a>${out}
+    </nav>`;
+  }
+  return html`<nav class="nav" aria-label="Menu"><a href="/admin"${cur('admin')}>Administração</a>${out}</nav>`;
 }
 
-/**
- * Página completa. `brand` permite exibir outra marca (entregas do pacote com a marca do parceiro).
- */
-export function layout({ title, body, noindex = false, brand = null, header = null, bodyClass = '', description = '' }) {
+export function layout({ title, body, user = null, active = '', noindex = true, description = '' }) {
   const s = getSettings();
-  const color = sanitizeColor(brand?.color || s.brand_color);
+  const color = sanitizeColor(s.brand_color);
   const on = contrastText(color);
-  const b = brand || { name: s.brand_name, logoUrl: s.brand_logo_file ? '/marca/logo' : null };
-  const fullTitle = title ? `${title} | ${s.brand_name}` : `${s.brand_name} — Simulador de fachadas`;
+  const fullTitle = title ? `${title} | ${s.brand_name}` : `${s.brand_name}: fachada e comunicação visual para o seu negócio`;
   return `<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -48,100 +69,88 @@ ${description ? html`<meta name="description" content="${description}">` : ''}
 ${noindex ? '<meta name="robots" content="noindex, nofollow">' : ''}
 <meta name="theme-color" content="#f4f3f1">
 <link rel="icon" href="data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='${color}'/><g transform='translate(4 4)' fill='none' stroke='${on}' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'><path d='M3 9l1.5-5h15L21 9M3 9h18M5 13v7h14v-7M10 20v-4h4v4'/></g></svg>`)}">
-<link rel="stylesheet" href="/static/app.css?v=3">
+<link rel="stylesheet" href="/static/app.css?v=10">
 <style>:root{--brand:${color};--on-brand:${on};}</style>
-<script src="/static/app.js?v=3" defer></script>
+<script src="/static/app.js?v=10" defer></script>
 </head>
-<body class="${html`${bodyClass}`}">
+<body>
+<a class="skip" href="#conteudo">Pular para o conteúdo</a>
 <header class="topbar"><div class="wrap topbar-in">
-  ${brandMark(b)}
-  ${header ?? ''}
+  <a class="brand" href="${user ? (user.role === 'admin' ? '/admin' : '/painel') : '/'}"><span class="brand-glyph">${GLYPH}</span><span class="brand-name">${html`${s.brand_name}`}</span></a>
+  ${nav(user, active)}
 </div></header>
-${body}
+<div id="conteudo">${body}</div>
+<footer class="footer"><div class="wrap small muted">
+  <p><strong>${html`${s.brand_name}`}</strong> aproxima empresas e prestadores de comunicação visual. A plataforma não é parte dos contratos, não recebe pagamentos e não executa serviços.</p>
+  <p><a href="/termos">Termos de uso</a> · <a href="/privacidade">Privacidade</a> · <a href="/criar">Simulador de fachada</a></p>
+</div></footer>
 </body>
 </html>`;
 }
 
-/** Comparação antes/depois: arraste (mouse/toque) ou use as setas do teclado. */
-export function compare({ before, after, width, height, label = 'Comparação antes e depois', tag = null, beforeLabel = 'Antes', afterLabel = 'Depois' }) {
-  const ratio = width && height ? `${width} / ${height}` : '3 / 2';
-  return html`<figure class="compare" style="aspect-ratio:${ratio}" data-compare>
-    <img class="compare-img" src="${after}" alt="${afterLabel}" loading="lazy" draggable="false">
-    <div class="compare-before"><img class="compare-img" src="${before}" alt="${beforeLabel}" loading="lazy" draggable="false"></div>
-    <span class="compare-label compare-label-l" aria-hidden="true">${beforeLabel}</span>
-    <span class="compare-label compare-label-r" aria-hidden="true">${afterLabel}</span>
-    ${tag ? html`<span class="compare-tag">${tag}</span>` : ''}
-    <div class="compare-handle" aria-hidden="true"><span class="compare-knob">
-      <svg viewBox="0 0 24 24" width="22" height="22"><path d="M9 6l-6 6 6 6M15 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    </span></div>
-    <input class="compare-range" type="range" min="0" max="100" value="50" step="1" aria-label="${label}" aria-valuetext="50% antes, 50% depois">
-  </figure>`;
-}
-
-export function includesList(kind) {
-  const s = getSettings();
-  if (kind === 'pacote') {
-    return {
-      title: 'Pacote para empresas de comunicação visual',
-      price: formatBRL(s.price_package),
-      items: [
-        'Cinco simulações de fachada',
-        'Solicite uma de cada vez, quando precisar',
-        'Duas propostas aplicadas à foto em cada simulação',
-        'Apresentação com a marca da sua empresa',
-        'Saldo de créditos sempre visível',
-      ],
-    };
-  }
-  return {
-    title: 'Simulação avulsa',
-    price: formatBRL(s.price_single),
-    items: [
-      'Duas propostas aplicadas à foto da mesma fachada',
-      'Comparação de antes e depois em cada proposta',
-      'Direito a um ajuste na opção escolhida',
-      'Link privado para compartilhar pelo WhatsApp',
-      'Imagens para baixar',
-    ],
-  };
-}
-
-export const check = raw('<svg class="ico-check" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M4 10.5l4 4 8-9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>');
+export const page = (inner, cls = 'narrow') => html`<main class="wrap ${cls} page">${inner}</main>`;
 
 export function alert(type, msg) {
   if (!msg) return '';
   return html`<div class="alert alert-${type}" role="${type === 'error' ? 'alert' : 'status'}">${msg}</div>`;
 }
+export const badge = (key, label) => html`<span class="badge badge-${key}">${label}</span>`;
 
-/** Mensagens curtas passadas por ?msg= após redirecionamentos. */
 export const MESSAGES = {
-  pago: ['success', 'Pagamento registrado. O pedido entrou em produção.'],
-  pago_ja: ['info', 'Este pagamento já estava registrado. Nada foi duplicado.'],
-  proposta: ['success', 'Imagem da proposta enviada. Ela só aparece para o cliente depois de publicar.'],
-  proposta_dup: ['info', 'Este envio já tinha sido recebido.'],
-  proposta_removida: ['success', 'Proposta removida.'],
-  publicado: ['success', 'Entrega publicada. Copie o link ou abra o WhatsApp para avisar o cliente.'],
-  revisao: ['success', 'Versão revisada publicada no link de entrega.'],
-  revogado: ['success', 'Link revogado. Quem tinha o endereço antigo não consegue mais acessar.'],
-  novo_link: ['success', 'Novo link de entrega gerado.'],
-  concluido: ['success', 'Pedido marcado como concluído.'],
-  reaberto: ['success', 'Pedido reaberto.'],
-  config: ['success', 'Configurações salvas.'],
+  bemvindo: ['success', 'Conta criada. Bem-vindo(a)!'],
+  pedido: ['success', 'Pedido publicado! Os prestadores da sua região já podem enviar propostas.'],
+  pedido_editado: ['success', 'Pedido atualizado.'],
+  cancelado: ['success', 'Pedido cancelado. Os prestadores não podem mais enviar propostas.'],
+  proposta: ['success', 'Proposta enviada. A empresa vai ser avisada no painel dela.'],
+  proposta_editada: ['success', 'Proposta atualizada.'],
+  retirada: ['success', 'Proposta retirada.'],
+  msg: ['success', 'Mensagem enviada.'],
+  aceita: ['success', 'Proposta aceita e contrato assinado por você. Agora falta o prestador assinar.'],
+  assinado: ['success', 'Contrato assinado pelas duas partes. Ele já está em vigor.'],
+  recusado: ['info', 'Você recusou o contrato. O pedido voltou a receber propostas.'],
+  desistiu: ['info', 'Contrato cancelado. O pedido voltou a receber propostas.'],
+  concluido: ['success', 'Serviço marcado como concluído. Que tal avaliar o prestador?'],
+  avaliado: ['success', 'Obrigado pela avaliação!'],
+  conta: ['success', 'Dados salvos.'],
   senha: ['success', 'Senha alterada.'],
-  membro: ['success', 'Acesso criado para o novo membro da equipe.'],
-  favorita: ['success', 'Proposta favorita registrada.'],
-  ajuste: ['success', 'Pedido de ajuste enviado. Você vai receber a versão revisada neste mesmo link.'],
-  aprovado: ['success', 'Obrigado! Pedido concluído. As imagens continuam disponíveis para download.'],
-  briefing: ['success', 'Briefing enviado. 1 crédito foi descontado do saldo.'],
-  ajuste_avulso: ['error', 'O ajuste está disponível apenas na simulação avulsa.'],
-  ajuste_slot: ['error', 'Escolha uma das propostas.'],
-  ajuste_curto: ['error', 'Descreva o ajuste com pelo menos 10 caracteres.'],
-  ajuste_falha: ['error', 'Não foi possível registrar o ajuste agora. Tente novamente.'],
-  briefing_dup: ['info', 'Este briefing já tinha sido recebido. Nenhum crédito extra foi descontado.'],
+  bloqueado: ['success', 'Conta bloqueada.'],
+  desbloqueado: ['success', 'Conta desbloqueada.'],
 };
-/** Páginas públicas só mostram mensagens conhecidas; texto livre em ?erro= aparece apenas no painel (com login). */
-export function flash(req, { allowText = false } = {}) {
+export function flash(req) {
   const m = MESSAGES[req.query.msg];
-  const err = allowText && typeof req.query.erro === 'string' ? req.query.erro.slice(0, 300) : '';
-  return [m ? alert(m[0], m[1]) : '', err ? alert('error', err) : ''];
+  return m ? alert(m[0], m[1]) : '';
+}
+
+export function stars(avg, n) {
+  if (!n) return html`<span class="muted small">Sem avaliações ainda</span>`;
+  const full = Math.round(avg);
+  return html`<span class="stars" aria-label="Nota ${avg.toFixed(1)} de 5, ${n} avaliações">${'★'.repeat(full)}<span class="stars-off">${'★'.repeat(5 - full)}</span> <span class="small muted">${avg.toFixed(1).replace('.', ',')} (${n})</span></span>`;
+}
+
+/** Campo de anexo com prévia (o comportamento fica em /static/app.js). */
+export function fileSlot({ name, label, hint, required = false, accept = 'image/jpeg,image/png,image/webp', maxMb = 10, multiple = 0 }) {
+  return html`<div class="file-slot" data-file-slot data-name="${name}" data-multiple="${multiple || 1}" data-max-mb="${maxMb}">
+    <div class="file-head"><span class="label">${label}${required ? html`<span class="req">obrigatório</span>` : html`<span class="opt">opcional</span>`}</span>${hint ? html`<span class="hint">${hint}</span>` : ''}</div>
+    <div class="file-previews" data-previews></div>
+    <label class="file-pick"><input type="file" name="${name}" accept="${accept}" ${multiple ? raw('multiple') : ''} ${required ? raw('required') : ''} data-input><span class="file-pick-btn"><span data-pick-text>${multiple ? 'Adicionar imagens' : 'Escolher arquivo'}</span></span></label>
+    <p class="field-error" data-error hidden></p>
+  </div>`;
+}
+
+export function field({ name, label, value = '', type = 'text', required = true, hint = '', attrs = '', error = '' }) {
+  return html`<label class="field ${error ? 'has-error' : ''}"><span class="label">${label}${required ? '' : html`<span class="opt">opcional</span>`}</span>
+    ${type === 'textarea'
+      ? html`<textarea name="${name}" ${required ? raw('required') : ''} ${raw(attrs)}>${value}</textarea>`
+      : html`<input type="${type}" name="${name}" value="${value}" ${required ? raw('required') : ''} ${raw(attrs)}>`}
+    ${hint ? html`<span class="hint">${hint}</span>` : ''}${error ? html`<p class="field-error">${error}</p>` : ''}</label>`;
+}
+export function select({ name, label, options, value = '', required = true, placeholder = 'Selecione', error = '' }) {
+  const opts = Array.isArray(options) ? options.map((o) => [o, o]) : Object.entries(options);
+  return html`<label class="field ${error ? 'has-error' : ''}"><span class="label">${label}${required ? '' : html`<span class="opt">opcional</span>`}</span>
+    <select name="${name}" ${required ? raw('required') : ''}><option value="">${placeholder}</option>${opts.map(([k, v]) => html`<option value="${k}" ${k === value ? raw('selected') : ''}>${v}</option>`)}</select>
+    ${error ? html`<p class="field-error">${error}</p>` : ''}</label>`;
+}
+export function chips({ name, options, values = [], group = '', error = '' }) {
+  return html`<div class="chips" ${group ? raw(`data-required-group="${group}"`) : ''}>${Object.entries(options).map(([k, v]) => html`<label class="chip"><input type="checkbox" name="${name}" value="${k}" ${values.includes(k) ? raw('checked') : ''}><span>${v}</span></label>`)}</div>
+    <p class="field-error" data-error-for="${group || name}" ${error ? '' : raw('hidden')}>${error}</p>`;
 }

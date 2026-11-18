@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Simulador de fachada | Fachada em Vista</title>
+<meta name="description" content="Monte a placa da sua loja numa foto real de fachada e veja como fica, de dia e de noite. Grátis.">
+<link rel="stylesheet" href="/static/app.css?v=10">
+<style>:root{--brand:#C4431B;--on-brand:#ffffff;}</style>
+<script src="/static/criar.js?v=10" defer></script>
+</head>
+<body>
+<a class="skip" href="#conteudo">Pular para o conteúdo</a>
+<header class="topbar"><div class="wrap topbar-in">
+  <a class="brand" href="/"><span class="brand-glyph"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 9l1.5-5h15L21 9M3 9h18M3 9v1.5a3 3 0 006 0 3 3 0 006 0 3 3 0 006 0V9M5 13v7h14v-7M10 20v-4h4v4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="brand-name">Fachada em Vista</span></a>
+  <nav class="nav" aria-label="Menu"><a href="/painel">Meu painel</a><a class="btn btn-sm btn-primary" href="/pedidos/novo">Publicar pedido</a></nav>
+</div></header>
+<main class="wrap page" id="conteudo">
+  <p class="eyebrow">Grátis · sem cadastro</p>
+  <h1>Simule a placa da sua loja</h1>
+  <p class="lead">Escolha uma fachada real ou envie a foto do seu ponto, escreva o nome, escolha a placa e as cores. A prévia muda na hora. Depois, use a imagem no seu pedido para os prestadores entenderem a ideia.</p>
+  <div class="builder">
+    <div class="bprev">
+      <div id="prev" class="cr-prev busy" role="img" aria-label="Prévia da fachada"></div>
+      <div class="row-between" style="margin-top:10px">
+        <div class="chips" style="margin:0" role="radiogroup" aria-label="Iluminação"><label class="chip"><input type="radio" name="noite" value="dia" data-k="noite"><span>Dia</span></label><label class="chip"><input type="radio" name="noite" value="noite" data-k="noite"><span>Noite</span></label></div>
+        <button type="button" class="btn btn-sm btn-outline" data-baixar>Baixar imagem</button>
+      </div>
+      <p class="small muted bprev-note">Simulação visual. Medidas, materiais e instalação são confirmados pelo prestador.</p>
+    </div>
+    <form class="stack" id="cr-form" novalidate>
+      <fieldset class="card"><legend>1. Escolha a fachada</legend>
+        <div class="tiles" id="tiles" role="radiogroup"><label class="tile"><input type="radio" name="modelo" value="foto" data-k="modelo"><span id="tile-foto-img"></span><span>Foto do meu ponto</span></label></div>
+        <div id="foto-box" hidden style="margin-top:14px">
+          <label class="file-pick"><input type="file" id="foto-in" accept="image/jpeg,image/png,image/webp"><span class="file-pick-btn" id="foto-btn">Enviar foto do ponto</span></label>
+          <p class="field-error" data-err="foto" hidden></p>
+          <p class="hint" style="margin-top:6px">A foto fica só no seu aparelho. Ajuste onde a placa aparece:</p>
+          <div class="grid2">
+            <label class="field rng"><span class="label">Posição horizontal</span><input type="range" min="0" max="100" data-k="px"></label>
+            <label class="field rng"><span class="label">Posição vertical</span><input type="range" min="0" max="100" data-k="py"></label>
+            <label class="field rng"><span class="label">Largura da placa</span><input type="range" min="10" max="100" data-k="pw"></label>
+            <label class="field rng"><span class="label">Altura da placa</span><input type="range" min="8" max="60" data-k="ph"></label>
+          </div>
+        </div>
+      </fieldset>
+      <fieldset class="card"><legend>2. Nome na placa</legend>
+        <label class="field"><span class="label">Nome da loja</span><input id="nome" maxlength="40" data-k="nome" placeholder="Ex.: Café Aurora" autocomplete="organization"><p class="field-error">Escreva o nome da loja.</p></label>
+        <label class="field" style="margin:0"><span class="label">Frase ou segmento<span class="opt">opcional</span></span><input maxlength="50" data-k="slogan" placeholder="Ex.: Padaria e confeitaria"></label>
+      </fieldset>
+      <fieldset class="card"><legend>3. Tipo de placa</legend>
+        <div class="chips" id="estilos" role="radiogroup"></div>
+        <p class="label" style="margin:6px 0">Letra</p>
+        <div class="chips" id="fontes" role="radiogroup"></div>
+      </fieldset>
+      <fieldset class="card"><legend>4. Cores</legend>
+        <div class="palettes" id="paletas"></div>
+        <div class="colors"><label><input type="color" data-k="corPlaca"><span>Placa</span></label><label><input type="color" data-k="corLetra"><span>Letras</span></label><label><input type="color" data-k="corFachada"><span>Parede (letra caixa)</span></label></div>
+      </fieldset>
+      <fieldset class="card"><legend>5. Logo<span class="opt">opcional</span></legend>
+        <div class="row"><label class="file-pick small-pick"><input type="file" id="logo-in" accept="image/png,image/jpeg,image/webp"><span class="file-pick-btn" id="logo-btn">Adicionar logo</span></label><span id="logo-thumb"></span><button type="button" class="btn btn-sm btn-ghost" id="logo-rm" hidden>Remover</button></div>
+        <p class="field-error" data-err="logo" hidden></p>
+        <p class="hint" style="margin:6px 0 0">A parte vazia em volta da logo é cortada automaticamente.</p>
+      </fieldset>
+      <div class="card">
+        <h2 class="h3">Gostou?</h2>
+        <p class="small">Use esta imagem no seu pedido: ela vai anexada para os prestadores orçarem em cima da sua ideia.</p>
+        <div class="stack" style="gap:10px"><button type="button" class="btn btn-primary btn-lg btn-block" id="usar">Usar no meu pedido</button><button type="button" class="btn btn-outline btn-block" data-baixar>Baixar imagem</button></div>
+      </div>
+    </form>
+  </div>
+  <p class="small muted" style="margin-top:24px">Fotos base de fachadas: chris.rycroft (CC BY 2.0), Myotus (CC BY 4.0) e Wikociewie (CC0), via Wikimedia Commons. As imagens geradas trazem o crédito no canto.</p>
+</main>
+</body>
+</html>
