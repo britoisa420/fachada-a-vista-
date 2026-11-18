@@ -1,0 +1,21 @@
+{
+  "name": "fachada-em-vista",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fachada em Vista | Delta — simulador de fachadas para lojistas",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch src/server.js",
+    "test:e2e": "node --disable-warning=ExperimentalWarning tests/e2e.mjs"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "image-size": "^2.1.0",
+    "multer": "^2.5.0"
+  }
+}

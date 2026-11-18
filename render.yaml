@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: fachada-em-vista
+    runtime: docker
+    plan: starter            # disco persistente exige plano pago (a partir de US$ 7/mês)
+    healthCheckPath: /
+    disk:
+      name: dados
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: PUBLIC_URL
+        sync: false
+      - key: MP_ACCESS_TOKEN
+        sync: false
