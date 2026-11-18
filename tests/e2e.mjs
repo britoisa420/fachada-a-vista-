@@ -40,7 +40,29 @@ const mobile = await browser.newContext({ ...devices['Pixel 7'], baseURL: BASE }
 const desk = await browser.newContext({ viewport: { width: 1280, height: 900 }, baseURL: BASE });
 const page = await mobile.newPage();
 const admin = await desk.newPage();
-const shot = (p, name) => p.screenshot({ path: path.join(SHOTS, name + '.png'), fullPage: true });
+const problems = [];
+function watch(p, label) {
+  p.on('console', (m) => { if (m.type() === 'error' && !m.text().includes('401')) problems.push(`[${label}] console: ${m.text()} @ ${p.url()}`); });
+  p.on('pageerror', (e) => problems.push(`[${label}] erro JS: ${e.message} @ ${p.url()}`));
+  p.on('response', (r) => { if (r.status() >= 400 && !r.url().includes('favicon') && !(r.status() === 401 && r.url().endsWith('/painel/login'))) problems.push(`[${label}] HTTP ${r.status()} ${r.url()}`); });
+}
+watch(page, 'cliente');
+watch(admin, 'painel');
+// Captura a tela e confere se nada estoura a largura em celulares pequenos (360px) nem na largura atual
+async function shot(p, name) {
+  await p.screenshot({ path: path.join(SHOTS, name + '.png'), fullPage: true });
+  const vp = p.viewportSize();
+  for (const w of [vp.width, 360]) {
+    await p.setViewportSize({ width: w, height: vp.height });
+    const over = await p.evaluate(() => {
+      const W = document.documentElement.clientWidth;
+      const bad = [...document.querySelectorAll('body *')].filter((e) => { const r = e.getBoundingClientRect(); return r.width && (r.right > W + 1 || r.left < -1) && !e.closest('.filters, .rail, .compare, .sr-only'); });
+      return { doc: document.documentElement.scrollWidth > W, els: bad.slice(0, 5).map((e) => e.tagName.toLowerCase() + (e.className ? '.' + String(e.className).split(' ')[0] : '') + ' ' + Math.round(e.getBoundingClientRect().right) + '/' + W) };
+    });
+    if (over.doc || over.els.length) problems.push(`[${name} @${w}px] estouro de largura: ${over.els.join(', ')}`);
+  }
+  await p.setViewportSize(vp);
+}
 
 async function multipart(url, fields, files = {}) {
   const fd = new FormData();
@@ -100,6 +122,9 @@ try {
   await page.fill('[name=whatsapp]', '(11) 98765-4321');
   await page.getByLabel('Letreiro iluminado').check();
   await page.getByLabel('Pintura').check();
+  await page.getByLabel('Outra alteração').check();
+  ok(await page.locator('#outra-wrap').isVisible(), 'campo "Qual alteração?" aparece ao marcar "Outra alteração"');
+  await page.fill('[name=outra]', 'Toldo novo');
   await page.fill('[name=cores]', 'Grafite e dourado');
   await page.fill('[name=descricao]', 'Letreiro em letras caixa iluminadas, fachada grafite.');
   await page.fill('[name=preservar_outros]', 'Toldo');
@@ -249,6 +274,7 @@ try {
   // ===================================================================
   step('Pacote: compra');
   const pp = await mobile.newPage();
+  watch(pp, 'pacote');
   await pp.goto('/');
   await pp.getByRole('link', { name: 'Comprar pacote de 5' }).first().click();
   await pp.fill('[name=nome]', 'Rafael Lima');
@@ -330,6 +356,8 @@ try {
   ok(home.includes('--brand:#0f766e') && home.includes('/marca/logo'), 'cor principal e logo configuráveis');
 
   console.log(`\n✅ ${passed} verificações passaram.`);
+  if (problems.length) { console.log(`\n⚠ ${problems.length} problemas de auditoria:`); [...new Set(problems)].forEach((x) => console.log('  - ' + x)); process.exitCode = 1; }
+  else console.log('✅ Auditoria: sem erros de console, sem falhas HTTP, sem estouro de largura (inclusive em 360px).');
 } catch (e) {
   console.error('\n❌', e.message);
   console.error(serverLog.split('\n').slice(-30).join('\n'));

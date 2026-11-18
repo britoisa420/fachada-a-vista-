@@ -1,4 +1,4 @@
-import { html, formatBRL, formatDate, formatPhone, waLink } from '../util.js';
+import { html, raw, formatBRL, formatDate, formatPhone, waLink } from '../util.js';
 import { getSettings } from '../db.js';
 import { layout, statusBadge, STATUS, CHANGE_TYPES, PRESERVE, flash, alert } from './common.js';
 import { providerName } from '../payments.js';
@@ -41,7 +41,7 @@ export function ordersPage({ admin, orders, counts, status, q, req }) {
   const filters = [['', 'Todos'], ...['aguardando_pagamento', 'em_producao', 'entregue', 'ajuste_solicitado', 'concluido'].map((k) => [k, STATUS[k]])];
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   const body = html`<main class="wrap admin-main">
-    ${demoBanner()}${flash(req)}
+    ${demoBanner()}${flash(req, { allowText: true })}
     <h1>Pedidos</h1>
     <form class="search" method="get" action="/painel">
       ${status ? html`<input type="hidden" name="status" value="${status}">` : ''}
@@ -49,7 +49,7 @@ export function ordersPage({ admin, orders, counts, status, q, req }) {
       <button class="btn btn-outline">Buscar</button>
     </form>
     <nav class="filters" aria-label="Filtrar por status">
-      ${filters.map(([k, l]) => html`<a class="filter ${status === k ? 'active' : ''}" href="/painel${k ? `?status=${k}` : ''}" ${status === k ? 'aria-current="page"' : ''}>${l} <span>${k ? counts[k] || 0 : total}</span></a>`)}
+      ${filters.map(([k, l]) => html`<a class="filter ${status === k ? 'active' : ''}" href="/painel${k ? `?status=${k}` : ''}" ${status === k ? raw('aria-current="page"') : ''}>${l} <span>${k ? counts[k] || 0 : total}</span></a>`)}
     </nav>
     ${orders.length ? html`<ul class="order-list">${orders.map((o) => html`<li><a class="order-row" href="/painel/pedido/${o.id}">
       ${o.thumb ? html`<img src="/painel/arquivo/${o.thumb}" alt="" loading="lazy">` : html`<span class="thumb-empty"></span>`}
@@ -86,7 +86,7 @@ export function orderDetailPage({ admin, order, pkg, files, proposals, adjustmen
 
   const body = html`<main class="wrap admin-main">
     <a class="back" href="/painel">← Pedidos</a>
-    ${flash(req)}
+    ${flash(req, { allowText: true })}
     <div class="detail-head">
       <div>
         <p class="eyebrow">${order.id} · ${order.kind === 'pacote' ? html`Pacote <a href="/painel/pacote/${order.package_id}">${order.package_id}</a> · ${pkg?.company}` : 'Avulso'}</p>
@@ -195,7 +195,7 @@ export function orderDetailPage({ admin, order, pkg, files, proposals, adjustmen
 
 export function packagesPage({ admin, packages, req }) {
   const body = html`<main class="wrap admin-main">
-    ${demoBanner()}${flash(req)}
+    ${demoBanner()}${flash(req, { allowText: true })}
     <h1>Pacotes</h1>
     ${packages.length ? html`<ul class="order-list">${packages.map((p) => html`<li><a class="order-row" href="/painel/pacote/${p.id}">
       <span class="thumb-empty credits">${p.credits_total - p.used}</span>
@@ -210,7 +210,7 @@ export function packageDetailPage({ admin, pkg, briefings, logo, link, req, even
   const used = briefings.length;
   const body = html`<main class="wrap admin-main">
     <a class="back" href="/painel/pacotes">← Pacotes</a>
-    ${flash(req)}
+    ${flash(req, { allowText: true })}
     <p class="eyebrow">${pkg.id}</p>
     <h1>${pkg.company}</h1>
     <p>${statusBadge(pkg.status)} <span class="muted small">${used} de ${pkg.credits_total} créditos usados · saldo ${pkg.status === 'pago' ? pkg.credits_total - used : 0}</span></p>
@@ -256,7 +256,7 @@ export function configPage({ admin, admins, req, envInfo }) {
   const s = getSettings();
   const p = s.payment_provider;
   const body = html`<main class="wrap admin-main narrow">
-    ${demoBanner()}${flash(req)}
+    ${demoBanner()}${flash(req, { allowText: true })}
     <h1>Configurações</h1>
     <form method="post" action="/painel/config" enctype="multipart/form-data" class="stack">
       <section class="card">

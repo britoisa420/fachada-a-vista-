@@ -95,14 +95,14 @@ export function cleanupTmp(req) {
 }
 
 /** Envia um arquivo privado com cabeçalhos seguros. */
-export function sendStored(res, f, { download = false } = {}) {
+export function sendStored(res, f, { download = false, noCache = false } = {}) {
   const p = path.join(UPLOAD_DIR, f.stored_name);
   if (!fs.existsSync(p)) return res.status(404).send('Arquivo não encontrado');
   const ext = f.stored_name.split('.').pop();
   const base = (f.original_name || 'arquivo').replace(/\.[^.]+$/, '').replace(/[^\w\- ]+/g, '').trim() || 'arquivo';
   res.set({
     'Content-Type': f.mime,
-    'Cache-Control': 'private, max-age=3600',
+    'Cache-Control': noCache ? 'private, no-cache' : 'private, max-age=3600',
     'X-Robots-Tag': 'noindex',
     'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
     'Content-Disposition': `${download || ext === 'pdf' ? 'attachment' : 'inline'}; filename="${base}.${ext}"`,

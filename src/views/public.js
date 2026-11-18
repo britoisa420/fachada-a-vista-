@@ -1,4 +1,4 @@
-import { html, formatBRL, formatDate, waLink } from '../util.js';
+import { html, raw, formatBRL, formatDate, waLink } from '../util.js';
 import { getSettings } from '../db.js';
 import { layout, compare, includesList, check, statusBadge, CHANGE_TYPES, PRESERVE, DISCLAIMER, flash, alert } from './common.js';
 
@@ -142,7 +142,7 @@ export function briefingFields({ contact = true, contactLabel = 'Seus dados', st
     <legend>O que deseja testar</legend>
     <p class="hint">Marque uma ou mais opções.</p>
     <div class="chips" data-required-group="tipos">
-      ${Object.entries(CHANGE_TYPES).map(([k, v]) => html`<label class="chip"><input type="checkbox" name="tipos" value="${k}" ${k === 'outra' ? 'data-toggle="#outra-wrap"' : ''}><span>${v}</span></label>`)}
+      ${Object.entries(CHANGE_TYPES).map(([k, v]) => html`<label class="chip"><input type="checkbox" name="tipos" value="${k}" ${k === 'outra' ? raw('data-toggle="#outra-wrap"') : ''}><span>${v}</span></label>`)}
     </div>
     <label class="field" id="outra-wrap" hidden><span class="label">Qual alteração?</span><input name="outra" maxlength="200" placeholder="Ex.: toldo, adesivo na vitrine, iluminação"></label>
     <p class="field-error" data-error-for="tipos" hidden></p>

@@ -133,10 +133,15 @@ export const MESSAGES = {
   ajuste: ['success', 'Pedido de ajuste enviado. Você vai receber a versão revisada neste mesmo link.'],
   aprovado: ['success', 'Obrigado! Pedido concluído. As imagens continuam disponíveis para download.'],
   briefing: ['success', 'Briefing enviado. 1 crédito foi descontado do saldo.'],
+  ajuste_avulso: ['error', 'O ajuste está disponível apenas na simulação avulsa.'],
+  ajuste_slot: ['error', 'Escolha uma das propostas.'],
+  ajuste_curto: ['error', 'Descreva o ajuste com pelo menos 10 caracteres.'],
+  ajuste_falha: ['error', 'Não foi possível registrar o ajuste agora. Tente novamente.'],
   briefing_dup: ['info', 'Este briefing já tinha sido recebido. Nenhum crédito extra foi descontado.'],
 };
-export function flash(req) {
+/** Páginas públicas só mostram mensagens conhecidas; texto livre em ?erro= aparece apenas no painel (com login). */
+export function flash(req, { allowText = false } = {}) {
   const m = MESSAGES[req.query.msg];
-  const err = typeof req.query.erro === 'string' ? req.query.erro.slice(0, 300) : '';
+  const err = allowText && typeof req.query.erro === 'string' ? req.query.erro.slice(0, 300) : '';
   return [m ? alert(m[0], m[1]) : '', err ? alert('error', err) : ''];
 }

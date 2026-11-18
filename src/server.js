@@ -429,7 +429,7 @@ app.get('/e/:token/f/:fileId', (req, res) => {
     req.params.fileId, r.order.id,
   );
   if (!f) return res.status(404).end();
-  sendStored(res, f, { download: req.query.dl === '1' });
+  sendStored(res, f, { download: req.query.dl === '1', noCache: true });
 });
 app.get('/e/:token/marca', (req, res) => {
   const r = deliveryByToken(req.params.token);
@@ -457,10 +457,10 @@ app.post('/e/:token/ajuste', (req, res) => {
   const slot = String(req.body.slot || '');
   const desc = clip(req.body.descricao, 2000);
   const back = (q) => res.redirect(303, `/e/${req.params.token}?${q}#ajuste`);
-  if (o.kind !== 'avulso') return back('erro=' + encodeURIComponent('O ajuste está disponível apenas na simulação avulsa.'));
+  if (o.kind !== 'avulso') return back('msg=ajuste_avulso');
   if (o.adjustment_used) return back('msg=ajuste'); // repetição: já registrado, nada é duplicado
-  if (!publishedSlot(o.id, slot)) return back('erro=' + encodeURIComponent('Escolha uma das propostas.'));
-  if (desc.length < 10) return back('erro=' + encodeURIComponent('Descreva o ajuste com pelo menos 10 caracteres.'));
+  if (!publishedSlot(o.id, slot)) return back('msg=ajuste_slot');
+  if (desc.length < 10) return back('msg=ajuste_curto');
   const ok = tx(() => {
     const u = run("UPDATE orders SET adjustment_used = 1, chosen_slot = ?, status = 'ajuste_solicitado', updated_at = ? WHERE id = ? AND adjustment_used = 0 AND status = 'entregue'", slot, nowIso(), o.id);
     if (u.changes !== 1) return false;
@@ -468,7 +468,7 @@ app.post('/e/:token/ajuste', (req, res) => {
     logEvent(o.id, 'cliente', `Solicitou ajuste na proposta ${slot}.`);
     return true;
   });
-  back(ok ? 'msg=ajuste' : 'erro=' + encodeURIComponent('Não foi possível registrar o ajuste agora.'));
+  back(ok ? 'msg=ajuste' : 'msg=ajuste_falha');
 });
 app.post('/e/:token/concluir', (req, res) => {
   const r = deliveryByToken(req.params.token);
