@@ -1,6 +1,6 @@
-# Fachada em Vista · Delta
+# Fachada em Vista
 
-Simulador de fachadas: o lojista envia a foto da loja e paga. A equipe da Delta monta as propostas, publica tudo pelo painel e entrega um link privado ao cliente.
+Simulador de fachadas: o lojista envia a foto da loja e paga. A equipe monta as propostas, publica tudo pelo painel e entrega um link privado ao cliente.
 
 ## Rodar
 
@@ -11,7 +11,7 @@ npm start            # http://localhost:3000
 
 Requer Node 22.13 ou mais novo, porque usa o SQLite embutido (`node:sqlite`).
 
-- Painel: `/painel`. Na primeira execução, o acesso é **equipe@delta.local / delta-demo-2026**. Troque a senha em Configurações ou defina `ADMIN_EMAIL` e `ADMIN_PASSWORD`.
+- Painel: `/painel`. Na primeira execução, o acesso é **admin@fachadaemvista.local / fachada-demo-2026**. Troque a senha em Configurações ou defina `ADMIN_EMAIL` e `ADMIN_PASSWORD`.
 - Teste ponta a ponta: `python3 tests/make-fixtures.py tests/fixtures && npm run test:e2e`. São 70 verificações, feitas no Chromium com Playwright.
 
 ## Rotas principais

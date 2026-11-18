@@ -17,7 +17,7 @@ export function homePage() {
   <section class="hero">
     <div class="wrap hero-in">
       <div class="hero-copy">
-        <p class="eyebrow">${s.app_name} · simulação de fachadas</p>
+        <p class="eyebrow">Simulação de fachadas para lojistas</p>
         <h1>Veja como sua loja pode ficar antes de encomendar a placa</h1>
         <p class="lead">Envie uma foto da fachada e receba duas propostas aplicadas à imagem real da sua loja: placa nova, letreiro iluminado, pintura ou revestimento. Compare, escolha e encomende com segurança.</p>
         <div class="cta-row">
@@ -84,9 +84,9 @@ ${footer()}`;
 export function footer() {
   const s = getSettings();
   return html`<footer class="footer"><div class="wrap">
-    <p><strong>${s.brand_name}</strong> · ${s.app_name}</p>
+    <p><strong>${s.brand_name}</strong></p>
     <p class="muted small">${DISCLAIMER}</p>
-    ${s.delta_whatsapp ? html`<p><a href="${waLink(s.delta_whatsapp, `Olá! Tenho uma dúvida sobre o ${s.app_name}.`)}" target="_blank" rel="noopener">Falar com a ${s.brand_name} no WhatsApp</a></p>` : ''}
+    ${s.contact_whatsapp ? html`<p><a href="${waLink(s.contact_whatsapp, `Olá! Tenho uma dúvida sobre o ${s.brand_name}.`)}" target="_blank" rel="noopener">Falar conosco no WhatsApp</a></p>` : ''}
   </div></footer>`;
 }
 
@@ -246,7 +246,7 @@ export function orderPage({ order, files, baseUrl, req }) {
       <div class="copy-row"><input readonly value="${linkSelf}" aria-label="Link de acompanhamento"><button class="btn btn-outline" type="button" data-copy="${linkSelf}">Copiar</button></div>
     </div>
     ${fachada ? html`<div class="card"><h2 class="h3">Foto enviada</h2><img class="photo" src="/pedido/${order.id}/f/${fachada.id}?t=${t}" alt="Foto da fachada enviada"></div>` : ''}
-    ${s.delta_whatsapp ? html`<p class="center"><a href="${waLink(s.delta_whatsapp, `Olá! Tenho uma dúvida sobre o pedido ${order.id}.`)}" target="_blank" rel="noopener">Dúvidas? Fale com a ${s.brand_name}</a></p>` : ''}
+    ${s.contact_whatsapp ? html`<p class="center"><a href="${waLink(s.contact_whatsapp, `Olá! Tenho uma dúvida sobre o pedido ${order.id}.`)}" target="_blank" rel="noopener">Dúvidas? Fale conosco</a></p>` : ''}
   </main>${footer()}`;
   return layout({ title: `Pedido ${order.id}`, body, noindex: true });
 }

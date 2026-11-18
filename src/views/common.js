@@ -22,10 +22,10 @@ export const statusBadge = (s) => html`<span class="badge badge-${s}">${STATUS[s
 
 export const DISCLAIMER = 'Simulação visual. Confira medidas, materiais e instalação com a empresa responsável pela produção.';
 
-export function brandMark({ name, logoUrl, appName, href = '/' }) {
+const GLYPH = raw('<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 9l1.5-5h15L21 9M3 9h18M3 9v1.5a3 3 0 006 0 3 3 0 006 0 3 3 0 006 0V9M5 13v7h14v-7M10 20v-4h4v4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>');
+export function brandMark({ name, logoUrl, href = '/' }) {
   return html`<a class="brand" href="${href}">
-    ${logoUrl ? html`<img src="${logoUrl}" alt="${name}" class="brand-logo">` : html`<span class="brand-glyph" aria-hidden="true">Δ</span><span class="brand-name">${name}</span>`}
-    ${appName ? html`<span class="brand-app">${appName}</span>` : ''}
+    ${logoUrl ? html`<img src="${logoUrl}" alt="${name}" class="brand-logo">` : html`<span class="brand-glyph">${GLYPH}</span><span class="brand-name">${name}</span>`}
   </a>`;
 }
 
@@ -36,8 +36,8 @@ export function layout({ title, body, noindex = false, brand = null, header = nu
   const s = getSettings();
   const color = sanitizeColor(brand?.color || s.brand_color);
   const on = contrastText(color);
-  const b = brand || { name: s.brand_name, logoUrl: s.brand_logo_file ? '/marca/logo' : null, appName: s.app_name };
-  const fullTitle = title ? `${title} | ${s.app_name} · ${s.brand_name}` : `${s.app_name} | ${s.brand_name} — Simulador de fachadas`;
+  const b = brand || { name: s.brand_name, logoUrl: s.brand_logo_file ? '/marca/logo' : null };
+  const fullTitle = title ? `${title} | ${s.brand_name}` : `${s.brand_name} — Simulador de fachadas`;
   return `<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -47,7 +47,7 @@ export function layout({ title, body, noindex = false, brand = null, header = nu
 ${description ? html`<meta name="description" content="${description}">` : ''}
 ${noindex ? '<meta name="robots" content="noindex, nofollow">' : ''}
 <meta name="theme-color" content="#f4f3f1">
-<link rel="icon" href="data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='${color}'/><text x='16' y='23' font-size='20' text-anchor='middle' fill='${on}' font-family='Arial' font-weight='700'>Δ</text></svg>`)}">
+<link rel="icon" href="data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='${color}'/><g transform='translate(4 4)' fill='none' stroke='${on}' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'><path d='M3 9l1.5-5h15L21 9M3 9h18M5 13v7h14v-7M10 20v-4h4v4'/></g></svg>`)}">
 <link rel="stylesheet" href="/static/app.css?v=3">
 <style>:root{--brand:${color};--on-brand:${on};}</style>
 <script src="/static/app.js?v=3" defer></script>

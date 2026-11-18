@@ -151,8 +151,7 @@ export function logEvent(refId, actor, message) {
 
 // ---------- Configurações ----------
 export const DEFAULT_SETTINGS = {
-  brand_name: 'Delta',
-  app_name: 'Fachada em Vista',
+  brand_name: 'Fachada em Vista',
   brand_color: '#C4431B',
   brand_logo_file: '',
   payment_provider: 'demo', // demo | link | mercadopago
@@ -160,7 +159,7 @@ export const DEFAULT_SETTINGS = {
   payment_link_package: '',
   price_single_cents: '9900',
   price_package_cents: '34900',
-  delta_whatsapp: '',
+  contact_whatsapp: '',
   public_url: '',
 };
 let cache = null;

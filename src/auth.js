@@ -20,9 +20,9 @@ export function verifyPassword(pw, stored) {
 /** Cria o primeiro acesso da equipe (ADMIN_EMAIL / ADMIN_PASSWORD ou credenciais de demonstração). */
 export function seedAdmin() {
   if (get('SELECT COUNT(*) AS n FROM admins').n > 0) return;
-  const email = (process.env.ADMIN_EMAIL || 'equipe@delta.local').toLowerCase();
-  const pw = process.env.ADMIN_PASSWORD || 'delta-demo-2026';
-  run('INSERT INTO admins (email, name, pass_hash, created_at) VALUES (?,?,?,?)', email, 'Equipe Delta', hashPassword(pw), nowIso());
+  const email = (process.env.ADMIN_EMAIL || 'admin@fachadaemvista.local').toLowerCase();
+  const pw = process.env.ADMIN_PASSWORD || 'fachada-demo-2026';
+  run('INSERT INTO admins (email, name, pass_hash, created_at) VALUES (?,?,?,?)', email, 'Equipe', hashPassword(pw), nowIso());
   if (!process.env.ADMIN_PASSWORD) {
     setSetting('admin_demo_password', '1');
     console.log(`\n[Fachada em Vista] Acesso de demonstração ao painel: ${email} / ${pw}  (troque em Configurações)\n`);

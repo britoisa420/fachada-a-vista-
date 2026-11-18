@@ -261,15 +261,12 @@ export function configPage({ admin, admins, req, envInfo }) {
     <form method="post" action="/painel/config" enctype="multipart/form-data" class="stack">
       <section class="card">
         <h2 class="h3">Marca</h2>
-        <div class="grid2">
-          <label class="field"><span class="label">Nome da marca</span><input name="brand_name" value="${s.brand_name}" required maxlength="60"></label>
-          <label class="field"><span class="label">Nome do app</span><input name="app_name" value="${s.app_name}" required maxlength="60"></label>
-        </div>
+        <label class="field"><span class="label">Nome do app</span><input name="brand_name" value="${s.brand_name}" required maxlength="60"></label>
         <label class="field"><span class="label">Cor principal</span><input type="color" name="brand_color" value="${s.brand_color}" class="color-input"></label>
         <label class="field"><span class="label">Logo (PNG, WEBP, JPG ou SVG, até 5 MB)</span><input type="file" name="logo" accept="image/png,image/webp,image/jpeg,image/svg+xml"></label>
         ${s.brand_logo_file ? html`<div class="logo-preview"><img src="/marca/logo" alt="Logo atual"><label class="consent"><input type="checkbox" name="remover_logo" value="1"><span>Remover logo</span></label></div>` : ''}
-        <label class="field"><span class="label">WhatsApp da Delta para dúvidas <span class="opt">opcional</span></span><input name="delta_whatsapp" value="${s.delta_whatsapp}" inputmode="tel"></label>
-        <label class="field"><span class="label">Endereço público do app</span><input name="public_url" value="${s.public_url}" placeholder="https://simulador.delta.com.br"><span class="hint">Usado nos links enviados aos clientes e no retorno do checkout.</span></label>
+        <label class="field"><span class="label">WhatsApp para dúvidas dos clientes <span class="opt">opcional</span></span><input name="contact_whatsapp" value="${s.contact_whatsapp}" inputmode="tel"></label>
+        <label class="field"><span class="label">Endereço público do app</span><input name="public_url" value="${s.public_url}" placeholder="https://fachadaemvista.com.br"><span class="hint">Usado nos links enviados aos clientes e no retorno do checkout.</span></label>
       </section>
       <section class="card">
         <h2 class="h3">Pagamento</h2>

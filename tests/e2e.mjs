@@ -152,12 +152,12 @@ try {
   step('Painel: login e filtros');
   await admin.goto('/painel');
   ok(admin.url().includes('/painel/login'), 'painel exige login');
-  await admin.fill('[name=email]', 'equipe@delta.local');
+  await admin.fill('[name=email]', 'admin@fachadaemvista.local');
   await admin.fill('[name=senha]', 'errada');
   await admin.getByRole('button', { name: 'Entrar' }).click();
   ok(await admin.getByText('E-mail ou senha incorretos.').isVisible(), 'senha errada é recusada');
-  await admin.fill('[name=email]', 'equipe@delta.local');
-  await admin.fill('[name=senha]', 'delta-demo-2026');
+  await admin.fill('[name=email]', 'admin@fachadaemvista.local');
+  await admin.fill('[name=senha]', 'fachada-demo-2026');
   await admin.getByRole('button', { name: 'Entrar' }).click();
   await admin.waitForURL(BASE + '/painel');
   await admin.locator('.filters').getByRole('link', { name: /Em produção/ }).click();

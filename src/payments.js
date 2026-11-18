@@ -40,7 +40,7 @@ export async function getOrCreateCheckout({ refType, refId, baseUrl, accessToken
     run('INSERT INTO checkouts (id, ref_type, ref_id, provider, url, amount_cents, created_at) VALUES (?,?,?,?,?,?,?)', id, refType, refId, 'demo', returnUrl, amount, nowIso());
   } else if (provider === 'link') {
     const tpl = refType === 'order' ? s.payment_link_single : s.payment_link_package;
-    if (!tpl || !/^https:\/\//.test(tpl)) throw new UserError('O link de pagamento ainda não foi configurado pela Delta. Tente novamente mais tarde.', 503);
+    if (!tpl || !/^https:\/\//.test(tpl)) throw new UserError('O link de pagamento ainda não foi configurado. Tente novamente mais tarde.', 503);
     url = tpl.replaceAll('{pedido}', encodeURIComponent(refId)).replaceAll('{valor}', (amount / 100).toFixed(2));
   } else if (provider === 'mercadopago') {
     const tokenMp = process.env.MP_ACCESS_TOKEN;
@@ -52,7 +52,7 @@ export async function getOrCreateCheckout({ refType, refId, baseUrl, accessToken
       back_urls: { success: returnUrl, pending: returnUrl, failure: returnUrl },
       auto_return: 'approved',
       notification_url: `${baseUrl}/webhooks/mercadopago`,
-      statement_descriptor: 'DELTA',
+      statement_descriptor: 'FACHADAEMVISTA',
     };
     const r = await fetch(`${MP_API}/checkout/preferences`, {
       method: 'POST',

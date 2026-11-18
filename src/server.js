@@ -396,7 +396,7 @@ function partnerBrand(order) {
   if (order.kind !== 'pacote') return null;
   const pkg = get('SELECT * FROM packages WHERE id = ?', order.package_id);
   const logo = get("SELECT id FROM files WHERE owner_type = 'package' AND owner_id = ? AND role = 'logo'", pkg.id);
-  return { name: pkg.company, logoUrl: logo ? `/e/${order.delivery_token}/marca` : null, color: pkg.brand_color, appName: null, href: '#' };
+  return { name: pkg.company, logoUrl: logo ? `/e/${order.delivery_token}/marca` : null, color: pkg.brand_color, href: '#' };
 }
 function deliveryError(res, r) {
   if (r.error === 410) return sendHtml(res, pub.messagePage({ title: 'Link desativado', text: 'O acesso a esta simulação foi revogado. Peça um novo link para quem enviou.' }), 410);
@@ -479,7 +479,7 @@ app.post('/e/:token/concluir', (req, res) => {
 });
 
 // =====================================================================
-// PAINEL DA DELTA
+// PAINEL DA EQUIPE
 // =====================================================================
 app.get('/painel/login', (req, res) => {
   if (auth.currentAdmin(req)) return res.redirect('/painel');
@@ -727,10 +727,9 @@ P.post('/config', (req, res, next) => brandUpload(req, res, (err) => {
       removeFile(s.brand_logo_file);
       setSetting('brand_logo_file', '');
     }
-    setSetting('brand_name', clip(b.brand_name, 60) || 'Delta');
-    setSetting('app_name', clip(b.app_name, 60) || 'Fachada em Vista');
+    setSetting('brand_name', clip(b.brand_name, 60) || 'Fachada em Vista');
     setSetting('brand_color', sanitizeColor(b.brand_color, s.brand_color));
-    setSetting('delta_whatsapp', onlyDigits(b.delta_whatsapp));
+    setSetting('contact_whatsapp', onlyDigits(b.contact_whatsapp));
     const pu = clip(b.public_url, 200);
     if (pu && !/^https?:\/\/[^\s/]+/.test(pu)) throw new UserError('Endereço público inválido.');
     setSetting('public_url', pu.replace(/\/$/, ''));
